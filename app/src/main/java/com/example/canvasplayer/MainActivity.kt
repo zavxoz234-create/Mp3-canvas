@@ -108,7 +108,7 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
     val editPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         val edit = pendingEdit
         pendingEdit = null
-        if (result.resultCode == ComponentActivity.RESULT_OK && edit != null) scope.launch {
+        if (result.resultCode == android.app.Activity.RESULT_OK && edit != null) scope.launch {
             val saved = withContext(Dispatchers.IO) { runCatching { writeTrackTags(ctx, edit) } }
             if (saved.isSuccess) {
                 if (folder != null) onFolderChange(folder)
