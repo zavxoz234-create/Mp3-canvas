@@ -46,7 +46,7 @@ import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
-import com.yausername.youtubedl_android.FFmpeg
+import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.mapper.VideoFormat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
