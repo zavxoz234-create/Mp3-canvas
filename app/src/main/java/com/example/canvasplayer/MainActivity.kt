@@ -29,6 +29,13 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -71,6 +78,8 @@ import org.jaudiotagger.audio.AudioFileIO
 import org.jaudiotagger.tag.FieldKey
 import org.jaudiotagger.tag.images.ArtworkFactory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -78,6 +87,7 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.io.File
+import java.util.Locale
 import kotlin.math.max
 import kotlin.math.roundToLong
 
@@ -90,7 +100,11 @@ class MainActivity : ComponentActivity() {
     private var controller by mutableStateOf<MediaController?>(null)
     private var tracks by mutableStateOf<List<Track>>(emptyList())
     private val perms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        tracks = loadTracks(this, null)
+        reloadTracks()
+    }
+    private val reloadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private fun reloadTracks(root: String? = null) {
+        reloadScope.launch { tracks = withContext(Dispatchers.IO) { loadTracks(this@MainActivity, root) } }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,8 +112,8 @@ class MainActivity : ComponentActivity() {
         val future = MediaController.Builder(this, token).buildAsync()
         future.addListener({ controller = future.get() }, ContextCompat.getMainExecutor(this))
         perms.launch(if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.POST_NOTIFICATIONS) else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE))
-        tracks = loadTracks(this, null)
-        setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Panel)) { App(tracks, controller) { tracks = loadTracks(this@MainActivity, null) } } }
+        reloadTracks()
+        setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Panel)) { App(tracks, controller) { reloadTracks() } } }
     }
 }
 
@@ -125,7 +139,7 @@ private data class CoverResult(val title: String, val subtitle: String, val byte
     var trim by remember { mutableStateOf<TrimJob?>(null) }
     var pendingEdit by remember { mutableStateOf<TrackEdit?>(null) }
     var editDialogTrack by remember { mutableStateOf<Track?>(null) }
-    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.5.0") }
+    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.6.0") }
     var ytDlpReady by remember { mutableStateOf<Boolean?>(null) }
     var ytDlpInitError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -199,15 +213,18 @@ private data class CoverResult(val title: String, val subtitle: String, val byte
         tertiary = accent, onTertiary = Ink, background = Ink, surface = Panel, onSurface = Color.White,
         surfaceVariant = accent.copy(alpha = .12f), onSurfaceVariant = Color.LightGray
     )
+    val screen = when { job != null -> "trim"; inPlayer && player != null && track != null -> "player"; else -> "library" }
     MaterialTheme(colorScheme = scheme) { CompositionLocalProvider(LocalAccent provides accent) { Surface(Modifier.fillMaxSize(), color = Ink) {
-        when {
-            job != null -> TrimScreen(job.src, onCancel = { trim = null }) { start, end, done ->
-                Exporter.trim(ctx, job.src, start, end, Store.appFile(ctx, job.track, job.lyrics)) { result ->
+        AnimatedContent(targetState = screen, modifier = Modifier.fillMaxSize(),
+            transitionSpec = { (slideInHorizontally { it / 8 } + fadeIn()) togetherWith (slideOutHorizontally { -it / 8 } + fadeOut()) }, label = "screen-navigation") { target ->
+        when (target) {
+            "trim" -> job?.let { activeJob -> TrimScreen(activeJob.src, onCancel = { trim = null }) { start, end, done ->
+                Exporter.trim(ctx, activeJob.src, start, end, Store.appFile(ctx, activeJob.track, activeJob.lyrics)) { result ->
                     done(); if (result.isSuccess) { refresh++; trim = null }
                     Toast.makeText(ctx, if (result.isSuccess) "Video saved" else "Export failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                 }
-            }
-            inPlayer && player != null && track != null -> PlayerScreen(track, player, playing, shuffle, refresh, ytDlpReady, ytDlpInitError,
+            } }
+            "player" -> if (player != null && track != null) PlayerScreen(track, tracks, player, playing, shuffle, refresh, ytDlpReady, ytDlpInitError,
                 folderUris.entries.firstOrNull { (root, _) -> track.path.replace("\\", "/").startsWith(root.replace("\\", "/").trimEnd('/') + "/", true) }?.value ?: folderTree,
                 folderRoots.firstOrNull { root -> track.path.replace("\\", "/").startsWith(root.replace("\\", "/").trimEnd('/') + "/", true) } ?: folder,
                 onBack = { inPlayer = false }, onShuffle = { shuffle = !shuffle; player.shuffleModeEnabled = shuffle },
@@ -237,6 +254,7 @@ private data class CoverResult(val title: String, val subtitle: String, val byte
                     }
                 })
         }
+        }
     }
     editDialogTrack?.let { item -> EditTrackDialog(item, onDismiss = { editDialogTrack = null }) { edit ->
         editDialogTrack = null
@@ -253,12 +271,12 @@ private data class CoverResult(val title: String, val subtitle: String, val byte
             else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
         }
     } }
-    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.5.0").apply() },
-        title = { Text("Canvas Player 0.5.0") },
+    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.6.0").apply() },
+        title = { Text("Canvas Player 0.6.0") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
             Text("What’s new", style = MaterialTheme.typography.titleMedium)
-            Text("• Search and choose high-resolution album covers inside the app\n• Read album artist tags when grouping albums\n• Repair companion audio for visible sync waveforms\n• Animate, center, scroll, and tap synced lyric lines to seek\n• Swipe the artwork to open lyrics, leave the player, or change songs\n• Move library options and fix player menu anchoring")
-        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.5.0").apply() }) { Text("Got it") } })
+            Text("• Grant internet access to the in-app cover search\n• Decode audio waveforms more reliably, including float PCM\n• Read album artist tags when MediaStore leaves them blank\n• Animate screen changes, track changes, and artwork swaps")
+        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.6.0").apply() }) { Text("Got it") } })
     } }
 }
 
@@ -268,10 +286,13 @@ private data class CoverResult(val title: String, val subtitle: String, val byte
     var section by remember { mutableStateOf("Songs") }
     var selectedGroup by remember { mutableStateOf<String?>(null) }
     var listMenu by remember { mutableStateOf(false) }
-    val shown = tracks.filter { it.title.contains(search, true) || it.artist.contains(search, true) || it.album.contains(search, true) }
-    val artists = tracks.flatMap { track -> splitArtists(track.artist).ifEmpty { listOf("Unknown artist") }.map { it to track } }
-        .groupBy({ it.first }, { it.second }).toSortedMap(String.CASE_INSENSITIVE_ORDER)
-    val albums = tracks.groupBy { "${it.album.ifBlank { "Unknown album" }}\u0000${it.albumArtist.ifBlank { it.artist }}" }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+    val shown = tracks.filter { it.title.contains(search, true) || it.artist.contains(search, true) || it.album.contains(search, true) || it.albumArtist.contains(search, true) }
+    val artistPairs = tracks.flatMap { track -> splitArtists(track.artist).ifEmpty { listOf("Unknown artist") }.map { it to track } }
+    val artists = artistPairs.groupBy({ it.first.trim().lowercase(Locale.ROOT) }, { it })
+        .mapValues { (_, entries) -> entries.first().first to entries.map { it.second }.distinctBy { it.id } }.toSortedMap()
+    val albums = tracks.groupBy {
+        "${it.album.ifBlank { "Unknown album" }.trim().lowercase(Locale.ROOT)}\u0000${it.albumArtist.ifBlank { it.artist }.trim().lowercase(Locale.ROOT)}"
+    }.toSortedMap()
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column { Text("CANVAS", style = MaterialTheme.typography.labelLarge, color = LocalAccent.current); Text("Your music", style = MaterialTheme.typography.headlineMedium) }
@@ -296,12 +317,17 @@ private data class CoverResult(val title: String, val subtitle: String, val byte
             Spacer(Modifier.weight(1f))
         }
         val groupKey = selectedGroup
-        val groupCount = if (groupKey == null) 0 else if (section == "Artists") artists[groupKey].orEmpty().size else albums[groupKey].orEmpty().size
+        val groupCount = if (groupKey == null) 0 else if (section == "Artists") artists[groupKey]?.second?.size ?: 0 else albums[groupKey].orEmpty().size
+        val groupTitle = when {
+            groupKey == null -> section
+            section == "Artists" -> artists[groupKey]?.first ?: groupKey
+            else -> albums[groupKey]?.firstOrNull()?.album?.ifBlank { "Unknown album" } ?: "Unknown album"
+        }
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) { Text((selectedGroup ?: section).uppercase(), style = MaterialTheme.typography.labelMedium, color = LocalAccent.current); Text(if (selectedGroup != null) "$groupCount tracks" else when(section) { "Artists" -> "${artists.size} artists"; "Albums" -> "${albums.size} albums"; else -> "${shown.size} tracks" }, style = MaterialTheme.typography.titleLarge) }
+            Column(Modifier.weight(1f)) { Text(groupTitle.uppercase(), style = MaterialTheme.typography.labelMedium, color = LocalAccent.current); Text(if (selectedGroup != null) "$groupCount tracks" else when(section) { "Artists" -> "${artists.size} artists"; "Albums" -> "${albums.size} albums"; else -> "${shown.size} tracks" }, style = MaterialTheme.typography.titleLarge) }
         }
         val groupTracks = when {
-            section == "Artists" && selectedGroup != null -> artists[selectedGroup].orEmpty()
+            section == "Artists" && selectedGroup != null -> artists[selectedGroup]?.second.orEmpty()
             section == "Albums" && selectedGroup != null -> albums[selectedGroup].orEmpty()
             else -> emptyList()
         }
@@ -310,17 +336,18 @@ private data class CoverResult(val title: String, val subtitle: String, val byte
             tracks.isEmpty() -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Text("Choose a music folder to get started", color = Color.LightGray) }
             section == "Artists" && selectedGroup == null -> LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 12.dp)) {
                 itemsIndexed(artists.keys.toList(), key = { _, name -> name.lowercase() }) { _, name ->
-                    val songs = artists[name].orEmpty(); val sample = songs.firstOrNull()
+                    val label = artists[name]?.first ?: name
+                    val songs = artists[name]?.second.orEmpty(); val sample = songs.firstOrNull()
                     Row(Modifier.fillMaxWidth().clickable { selectedGroup = name }.padding(vertical = 8.dp, horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         sample?.let { AlbumArt(it, Modifier.size(56.dp).clip(RoundedCornerShape(28.dp))) }
-                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) { Text(name, style = MaterialTheme.typography.titleMedium); Text("${songs.size} songs", color = Color.LightGray) }
-                        IconButton(onClick = { selectedGroup = name }) { Icon(Icons.Default.ChevronRight, "Open artist $name") }
+                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) { Text(label, style = MaterialTheme.typography.titleMedium); Text("${songs.size} songs", color = Color.LightGray) }
+                        IconButton(onClick = { selectedGroup = name }) { Icon(Icons.Default.ChevronRight, "Open artist $label") }
                     }
                 }
             }
             section == "Albums" && selectedGroup == null -> LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 12.dp)) {
                 itemsIndexed(albums.keys.toList(), key = { _, name -> name }) { _, key ->
-                    val songs = albums[key].orEmpty(); val sample = songs.firstOrNull(); val title = key.substringBefore('\u0000')
+                    val songs = albums[key].orEmpty(); val sample = songs.firstOrNull(); val title = sample?.album?.ifBlank { "Unknown album" } ?: "Unknown album"
                     Row(Modifier.fillMaxWidth().clickable { selectedGroup = key }.padding(vertical = 8.dp, horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         sample?.let { AlbumArt(it, Modifier.size(56.dp).clip(RoundedCornerShape(12.dp))) }
                         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) { Text(title, style = MaterialTheme.typography.titleMedium); Text(sample?.albumArtist?.ifBlank { sample.artist }.orEmpty(), color = Color.LightGray) }
@@ -457,7 +484,7 @@ private fun imageDimensions(context: android.content.Context, uri: Uri): Pair<In
 private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: Boolean): List<CoverResult> {
     val endpoint = if (byAlbum) "album" else "track"
     val api = URL("https://api.deezer.com/search/$endpoint?q=${Uri.encode(query)}&limit=12")
-    val json = api.openConnection().apply { connectTimeout = 12_000; readTimeout = 15_000; setRequestProperty("User-Agent", "CanvasPlayer/0.5.0") }
+    val json = api.openConnection().apply { connectTimeout = 12_000; readTimeout = 15_000; setRequestProperty("User-Agent", "CanvasPlayer/0.6.0") }
         .getInputStream().bufferedReader().use { it.readText() }
     val data = JSONObject(json).optJSONArray("data") ?: return emptyList()
     return (0 until data.length()).mapNotNull { index ->
@@ -467,7 +494,7 @@ private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: 
             ?: album.optString("cover_big").takeIf { it.startsWith("https://") }
             ?: return@mapNotNull null
         runCatching {
-            val connection = URL(imageUrl).openConnection().apply { connectTimeout = 12_000; readTimeout = 15_000; setRequestProperty("User-Agent", "CanvasPlayer/0.5.0") }
+            val connection = URL(imageUrl).openConnection().apply { connectTimeout = 12_000; readTimeout = 15_000; setRequestProperty("User-Agent", "CanvasPlayer/0.6.0") }
             val bytes = connection.getInputStream().use { it.readBytes() }
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
@@ -527,7 +554,7 @@ private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: 
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
-@Composable private fun PlayerScreen(track: Track, player: Player, playing: Boolean, shuffle: Boolean, refresh: Int, ytDlpReady: Boolean?, ytDlpInitError: String?, folderTree: String?, rootFolder: String?, onBack: () -> Unit, onShuffle: () -> Unit, onYtDlpInit: (Boolean, String?) -> Unit, onTrim: (Uri, Boolean) -> Unit, onChanged: () -> Unit, onEditTrack: () -> Unit) {
+@Composable private fun PlayerScreen(track: Track, queueTracks: List<Track>, player: Player, playing: Boolean, shuffle: Boolean, refresh: Int, ytDlpReady: Boolean?, ytDlpInitError: String?, folderTree: String?, rootFolder: String?, onBack: () -> Unit, onShuffle: () -> Unit, onYtDlpInit: (Boolean, String?) -> Unit, onTrim: (Uri, Boolean) -> Unit, onChanged: () -> Unit, onEditTrack: () -> Unit) {
     val ctx = LocalContext.current
     var lyricsMode by remember { mutableStateOf(false) }; var menu by remember { mutableStateOf(false) }; var pendingLyrics by remember { mutableStateOf(false) }; var matches by remember { mutableStateOf<List<DocumentFile>?>(null) }; var pos by remember { mutableLongStateOf(0L) }
     val syncPrefs = remember { ctx.getSharedPreferences("video_sync", 0) }
@@ -610,8 +637,11 @@ private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: 
             }
         }
         Spacer(Modifier.weight(.4f))
-        Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(26.dp)).background(Panel).then(artworkGestures)) {
-            if (lyricsMode && lyrics.isNotEmpty()) {
+        AnimatedContent(targetState = track.id, modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+            transitionSpec = { (fadeIn(tween(260)) + slideInHorizontally { it / 7 }) togetherWith (fadeOut(tween(220)) + slideOutHorizontally { -it / 7 }) }, label = "track-artwork") { displayedTrackId ->
+        val displayedTrack = queueTracks.firstOrNull { it.id == displayedTrackId } ?: track
+        Box(Modifier.fillMaxSize().clip(RoundedCornerShape(26.dp)).background(Panel).then(artworkGestures)) {
+            if (displayedTrackId == track.id && lyricsMode && lyrics.isNotEmpty()) {
                 LazyColumn(state = lyricListState, modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp), contentPadding = PaddingValues(vertical = 104.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     itemsIndexed(lyrics, key = { index, line -> "${line.timeMs}-$index" }) { index, line ->
                         val activeColor by animateColorAsState(if (index == activeLyricIndex) LocalAccent.current else Color.LightGray.copy(alpha = .72f), label = "lyric-color")
@@ -623,8 +653,9 @@ private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: 
                             color = activeColor, maxLines = 3, overflow = TextOverflow.Ellipsis)
                     }
                 }
-            } else if (lyricsMode && lyrics.isEmpty()) Text("No synced lyrics found. Put ${track.title}.lrc beside the song.", color = Color.LightGray, modifier = Modifier.align(Alignment.Center).padding(24.dp))
-            else if (video != null) ArtBox(video, track.artUri, player, videoOffset, Modifier.fillMaxSize()) else AlbumArt(track, Modifier.fillMaxSize())
+            } else if (displayedTrackId == track.id && lyricsMode && lyrics.isEmpty()) Text("No synced lyrics found. Put ${track.title}.lrc beside the song.", color = Color.LightGray, modifier = Modifier.align(Alignment.Center).padding(24.dp))
+            else if (displayedTrackId == track.id && video != null) ArtBox(video, track.artUri, player, videoOffset, Modifier.fillMaxSize()) else AlbumArt(displayedTrack, Modifier.fillMaxSize())
+        }
         }
         Spacer(Modifier.height(26.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {

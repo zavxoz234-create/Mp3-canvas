@@ -3,6 +3,7 @@ package com.example.canvasplayer
 import android.content.ContentUris
 import android.content.Context
 import android.media.MediaCodec
+import android.media.AudioFormat
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
@@ -129,11 +130,24 @@ fun loadTracks(c: Context, rootFolder: String? = null): List<Track> {
         "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE"
     )?.use { cur ->
         val albumArtistIndex = if (Build.VERSION.SDK_INT >= 29) cur.getColumnIndex(MediaStore.Audio.Media.ALBUM_ARTIST) else -1
-        while (cur.moveToNext()) out += Track(
-            cur.getLong(0), cur.getString(1) ?: "Unknown", cur.getString(2) ?: "Unknown",
-            cur.getString(3) ?: "", cur.getLong(4), cur.getString(5) ?: "", cur.getLong(6),
-            if (albumArtistIndex >= 0) cur.getString(albumArtistIndex).orEmpty() else ""
-        )
+        while (cur.moveToNext()) {
+            val id = cur.getLong(0)
+            val track = Track(
+                id, cur.getString(1) ?: "Unknown", cur.getString(2) ?: "Unknown",
+                cur.getString(3) ?: "", cur.getLong(4), cur.getString(5) ?: "", cur.getLong(6),
+                if (albumArtistIndex >= 0) cur.getString(albumArtistIndex).orEmpty().trim() else ""
+            )
+            // MediaStore often omits ALBUM_ARTIST even when it is embedded in the MP3.
+            val albumArtist = track.albumArtist.ifBlank {
+                runCatching { MediaMetadataRetriever().run {
+                    setDataSource(c, ContentUris.withAppendedId(col, id))
+                    val value = extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST).orEmpty().trim()
+                    release()
+                    value
+                } }.getOrDefault("")
+            }
+            out += track.copy(albumArtist = albumArtist)
+        }
     }
     return out
 }
@@ -238,6 +252,7 @@ object WaveformAnalyzer {
             decoder.configure(format, null, null, 0)
             decoder.start()
             val info = MediaCodec.BufferInfo()
+            var outputFormat = format
             var inputEnded = false
             var outputEnded = false
             while (!outputEnded) {
@@ -256,27 +271,56 @@ object WaveformAnalyzer {
                     }
                 }
                 val outputIndex = decoder.dequeueOutputBuffer(info, 10_000)
+                if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    outputFormat = decoder.outputFormat
+                    continue
+                }
                 if (outputIndex >= 0) {
                     if (info.size > 0) {
                         val buffer = decoder.getOutputBuffer(outputIndex)
                         if (buffer != null) {
-                            buffer.order(ByteOrder.LITTLE_ENDIAN)
-                            buffer.position(info.offset); buffer.limit(info.offset + info.size)
-                            val samples = buffer.slice().order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-                            var sum = 0.0; var count = 0
-                            while (samples.hasRemaining()) { val sample = samples.get().toInt(); sum += sample.toDouble() * sample; count++ }
-                            val rms = if (count == 0) 0f else sqrt(sum / count).toFloat() / 32768f
-                            val time = info.presentationTimeUs.coerceAtLeast(0L) / 1000L
-                            val index = ((time * bins) / durationMs).toInt().coerceIn(0, bins - 1)
-                            levels[index] = maxOf(levels[index], rms)
+                            val channels = outputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+                            val sampleRate = outputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(1)
+                            val encoding = if (outputFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) outputFormat.getInteger(MediaFormat.KEY_PCM_ENCODING) else AudioFormat.ENCODING_PCM_16BIT
+                            val bytesPerSample = when (encoding) {
+                                AudioFormat.ENCODING_PCM_FLOAT, AudioFormat.ENCODING_PCM_32BIT -> 4
+                                AudioFormat.ENCODING_PCM_24BIT_PACKED -> 3
+                                AudioFormat.ENCODING_PCM_8BIT -> 1
+                                else -> 2
+                            }
+                            val pcm = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+                            pcm.position(info.offset.coerceAtLeast(0)); pcm.limit((info.offset + info.size).coerceAtMost(pcm.capacity()))
+                            val frameBytes = channels * bytesPerSample
+                            val frameCount = pcm.remaining() / frameBytes
+                            repeat(frameCount) { frame ->
+                                var peak = 0f
+                                repeat(channels) {
+                                    val sample = when (encoding) {
+                                        AudioFormat.ENCODING_PCM_FLOAT -> pcm.float.coerceIn(-1f, 1f)
+                                        AudioFormat.ENCODING_PCM_32BIT -> pcm.int.toFloat() / Int.MAX_VALUE
+                                        AudioFormat.ENCODING_PCM_24BIT_PACKED -> {
+                                            var raw = (pcm.get().toInt() and 0xff) or ((pcm.get().toInt() and 0xff) shl 8) or ((pcm.get().toInt() and 0xff) shl 16)
+                                            if (raw and 0x800000 != 0) raw = raw or -0x1000000
+                                            raw / 8388608f
+                                        }
+                                        AudioFormat.ENCODING_PCM_8BIT -> ((pcm.get().toInt() and 0xff) - 128) / 128f
+                                        else -> pcm.short.toFloat() / Short.MAX_VALUE
+                                    }
+                                    peak = maxOf(peak, kotlin.math.abs(sample))
+                                }
+                                val time = (info.presentationTimeUs / 1000L) + frame * 1000L / sampleRate
+                                val index = ((time * bins) / durationMs).toInt().coerceIn(0, bins - 1)
+                                levels[index] = maxOf(levels[index], peak)
+                            }
                         }
                     }
                     outputEnded = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                     decoder.releaseOutputBuffer(outputIndex, false)
                 }
             }
-            val peak = levels.maxOrNull()?.coerceAtLeast(.001f) ?: 1f
-            return WaveformData(durationMs, levels.map { (it / peak).coerceIn(.03f, 1f) })
+            val peak = levels.maxOrNull()?.coerceAtLeast(.001f) ?: return null
+            if (peak <= .0011f) return null
+            return WaveformData(durationMs, levels.map { (kotlin.math.sqrt(it / peak)).coerceIn(.06f, 1f) })
         } catch (_: Exception) {
             return null
         } finally {
