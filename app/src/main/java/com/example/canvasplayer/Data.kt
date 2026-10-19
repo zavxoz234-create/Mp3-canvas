@@ -26,6 +26,8 @@ import java.nio.ByteOrder
 import kotlin.math.sqrt
 import java.io.BufferedReader
 import java.text.Normalizer
+import org.jaudiotagger.audio.AudioFileIO
+import org.jaudiotagger.tag.FieldKey
 
 data class Track(
     val id: Long, val title: String, val artist: String,
@@ -44,6 +46,19 @@ data class Track(
                 .setAlbumTitle(album).setAlbumArtist(albumArtist.ifBlank { artist }).setArtworkUri(artUri).build()
         ).build()
 }
+
+private fun normalizeGroupValue(value: String): String = Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
+    .replace(Regex("\\p{Mn}+"), "").lowercase().replace(Regex("[^a-z0-9]"), "")
+
+/** Group by the album's actual album-artist tag; MediaStore album IDs can split compilations. */
+fun Track.albumGroupingKey(): String {
+    val albumName = normalizeGroupValue(album).ifBlank { "unknownalbum" }
+    val albumPerformer = normalizeGroupValue(albumArtist)
+    val folder = normalizeGroupValue(File(path).parent.orEmpty())
+    return "$albumName\u0000${albumPerformer.ifBlank { folder }}"
+}
+
+fun Track.belongsToSameAlbum(other: Track): Boolean = albumGroupingKey() == other.albumGroupingKey()
 
 data class TimedLyric(val timeMs: Long, val text: String)
 
@@ -138,18 +153,35 @@ fun loadTracks(c: Context, rootFolder: String? = null): List<Track> {
                 if (albumArtistIndex >= 0) cur.getString(albumArtistIndex).orEmpty().trim() else ""
             )
             // MediaStore often omits ALBUM_ARTIST even when it is embedded in the MP3.
-            val albumArtist = track.albumArtist.ifBlank {
-                runCatching { MediaMetadataRetriever().run {
-                    setDataSource(c, ContentUris.withAppendedId(col, id))
-                    val value = extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST).orEmpty().trim()
-                    release()
-                    value
-                } }.getOrDefault("")
-            }
+            val albumArtist = track.albumArtist.ifBlank { readEmbeddedAlbumArtist(c, track) }
             out += track.copy(albumArtist = albumArtist)
         }
     }
     return out
+}
+
+/** MediaStore and MediaMetadataRetriever both omit TPE2 on some Android builds; read the MP3 tag directly as a fallback. */
+private fun readEmbeddedAlbumArtist(context: Context, track: Track): String {
+    val uri = track.uri
+    val retriever = MediaMetadataRetriever()
+    val retrieverValue = try {
+        retriever.setDataSource(context, uri)
+        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST).orEmpty().trim()
+    } catch (_: Exception) { "" } finally { runCatching { retriever.release() } }
+    if (retrieverValue.isNotBlank()) return retrieverValue
+
+    val local = File(track.path)
+    val cachedCopy = File(context.cacheDir, "album-artist-${track.id}.audio")
+    return try {
+        val source = if (local.isFile && local.canRead()) local else {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                cachedCopy.outputStream().use { output -> input.copyTo(output) }
+            } ?: return ""
+            cachedCopy
+        }
+        AudioFileIO.read(source).tag?.getFirst(FieldKey.ALBUM_ARTIST).orEmpty().trim()
+    } catch (_: Exception) { "" }
+    finally { cachedCopy.delete() }
 }
 
 /** Finds the first and last audible decoder buffers in a downloaded video's audio stream. */
