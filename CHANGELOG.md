@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 — 2026-10-20
+
+### Fixed and improved
+- Explicitly merge Android internet access into the installed app manifest so the in-app cover finder can connect to Deezer.
+- Decode 8-bit, 16-bit, packed 24-bit, 32-bit, and float audio output when generating song and video sync waveforms; normalize quiet recordings so the waveform is visible.
+- Read embedded Album Artist metadata when Android MediaStore leaves its Album Artist column blank, and use it consistently to group album tracks.
+- Add slide and fade transitions when changing screens and when the current track artwork changes.
+
+### Notes
+- Waveform sync still needs an audio stream in the companion video; silent video can only be aligned with the timing slider.
+- Internet permission is granted at install time by Android; reinstall/update to v0.6.0 to receive the corrected app manifest.
+
 ## 0.5.0 — 2026-10-19
 
 ### Fixed and improved
