@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.1 — 2026-10-20
+
+### Fixed and improved
+- Remove the repeatedly rendered full-screen album-art blur that caused player-screen stutter.
+- Restore folder-filtered songs when Android's MediaStore paths do not exactly match the selected SAF folder, using its persisted folder grant as a fallback.
+- Show a clear empty-library message when a selected folder contains no indexed tracks.
+- Clear stale lyrics immediately on track changes and only update the lyric position from the matching current player item.
+- Keep precise manual video sync available when a companion video has no decodable audio waveform.
+- Refresh the player's companion video after an in-app download completes.
+
+### Notes
+- Age-restricted or sign-in-only YouTube videos may be unavailable to yt-dlp; the app does not bypass account or age checks. Choose an accessible video or import a local file instead.
+- A video without an audio stream cannot produce an audio waveform; use the manual sync controls.
+
 ## 0.7.0 — 2026-10-20
 
 ### Fixed and improved
