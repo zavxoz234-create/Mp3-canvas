@@ -540,6 +540,9 @@ private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: 
     var lookingUp by remember { mutableStateOf(false) }; var variants by remember { mutableStateOf<List<DownloadVariant>>(emptyList()) }; var selectedVariant by remember { mutableStateOf<String?>(null) }
     val lyricListState = rememberLazyListState()
     var lyricsInteraction by remember { mutableStateOf(false) }
+    val lyrics by produceState<List<TimedLyric>>(emptyList(), track.id, folderTree, rootFolder, refresh) {
+        value = withContext(Dispatchers.IO) { loadLrc(ctx, track, folderTree, rootFolder) }
+    }
     val activeLyricIndex = lyrics.indexOfLast { it.timeMs <= pos }.coerceAtLeast(0)
     LaunchedEffect(lyricListState.isScrollInProgress) {
         if (lyricListState.isScrollInProgress) lyricsInteraction = true
@@ -550,9 +553,6 @@ private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: 
     }
     val scope = rememberCoroutineScope()
     val visuals by produceState<Pair<Uri?, Uri?>>(null to null, track.id, refresh) { value = withContext(Dispatchers.IO) { Store.find(ctx, track, false) to Store.find(ctx, track, true) } }
-    val lyrics by produceState<List<TimedLyric>>(emptyList(), track.id, folderTree, rootFolder, refresh) {
-        value = withContext(Dispatchers.IO) { loadLrc(ctx, track, folderTree, rootFolder) }
-    }
     LaunchedEffect(player) { while (true) { pos = player.currentPosition; delay(400) } }
     val pickVideo = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) onTrim(uri, pendingLyrics) }
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
