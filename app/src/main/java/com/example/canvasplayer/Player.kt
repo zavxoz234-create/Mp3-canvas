@@ -104,11 +104,11 @@ fun LoopingVideo(uri: Uri, audio: Player) {
         onDispose { lifecycle.removeObserver(obs); vp.release() }
     }
 
-    AndroidView(Modifier.fillMaxSize(), factory = {
-        PlayerView(it).apply {
+    AndroidView(factory = { context ->
+        PlayerView(context).apply {
             player = vp
             useController = false
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
         }
-    })
+    }, modifier = Modifier.fillMaxSize())
 }
