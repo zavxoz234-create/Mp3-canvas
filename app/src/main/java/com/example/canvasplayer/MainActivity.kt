@@ -139,7 +139,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     var trim by remember { mutableStateOf<TrimJob?>(null) }
     var pendingEdit by remember { mutableStateOf<TrackEdit?>(null) }
     var editDialogTrack by remember { mutableStateOf<Track?>(null) }
-    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.7.0") }
+    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.7.1") }
     var ytDlpReady by remember { mutableStateOf<Boolean?>(null) }
     var ytDlpInitError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -163,10 +163,34 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             } else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
         }
     }
-    LaunchedEffect(tracks, folderRoots) {
+    LaunchedEffect(tracks, folderRoots, folderUris) {
         visibleTracks = if (folderRoots.isEmpty()) emptyList() else withContext(Dispatchers.IO) {
             val roots = folderRoots.map { it.replace("\\", "/").trimEnd('/') }
-            tracks.filter { track -> roots.any { root -> track.path.replace("\\", "/").startsWith("$root/", true) || track.path.replace("\\", "/").equals(root, true) } }.distinctBy { it.id }
+            val byPath = tracks.filter { track -> roots.any { root ->
+                val path = track.path.replace("\\", "/").trimEnd('/')
+                path.startsWith("$root/", true) || path.equals(root, true)
+            } }
+            val stems = mutableSetOf<String>()
+            fun visit(dir: DocumentFile, depth: Int) {
+                if (depth > 12 || stems.size > 20_000) return
+                runCatching { dir.listFiles().toList() }.getOrDefault(emptyList()).forEach { child ->
+                    if (child.isDirectory) visit(child, depth + 1)
+                    else if (child.isFile && child.name?.substringAfterLast('.', "")?.lowercase(Locale.ROOT)?.let { it in setOf("mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "wma") } == true) {
+                        child.name?.substringBeforeLast('.')?.let { stems += it.lowercase(Locale.ROOT) }
+                    }
+                }
+            }
+            folderRoots.forEach { root ->
+                val uri = folderUris[root] ?: if (root == folder) folderTree else null
+                if (uri != null) runCatching { DocumentFile.fromTreeUri(ctx, Uri.parse(uri))?.let { visit(it, 0) } }
+            }
+            val names = byPath.map { it.id }.toSet()
+            (byPath + tracks.filter { track ->
+                track.id !in names && (
+                    track.path.substringAfterLast('/').substringBeforeLast('.').lowercase(Locale.ROOT) in stems ||
+                        track.title.lowercase(Locale.ROOT) in stems
+                    )
+            }).distinctBy { it.id }
         }
     }
     DisposableEffect(player) {
@@ -269,11 +293,11 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
         }
     } }
     if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.0").apply() },
-        title = { Text("Canvas Player 0.7.0") },
+        title = { Text("Canvas Player 0.7.1") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
             Text("What’s new", style = MaterialTheme.typography.titleMedium)
-            Text("• Reduce transitions and lyric animation work to keep the player responsive\n• Reload synced lyrics and reset lyric position when the next song starts\n• Read embedded Album Artist tags directly and group full albums together\n• Add reliable manual video-sync controls when waveforms cannot be decoded\n• Apply one selected cover to every track in an album")
-        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.0").apply() }) { Text("Got it") } })
+            Text("• Reduce player stutter by removing the costly live artwork blur\n• Restore songs from selected folders when Android reports different file paths\n• Reload lyrics for each track and follow the current playback position\n• Keep manual video sync available when a video has no audio waveform\n• Downloaded videos are saved as companion videos and shown in the player")
+        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.1").apply() }) { Text("Got it") } })
     } }
 }
 
@@ -328,7 +352,12 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
         }
         val songRows = if (selectedGroup != null) groupTracks.filter { it.title.contains(search, true) } else shown
         when {
-            tracks.isEmpty() -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Text("Choose a music folder to get started", color = Color.LightGray) }
+            tracks.isEmpty() || visibleTracks.isEmpty() -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(if (folder == null) "Choose a music folder to get started" else "No indexed songs found in this folder yet", color = Color.LightGray)
+                    if (folder != null) TextButton(onClick = onChooseFolder) { Text("Choose another folder") }
+                }
+            }
             section == "Artists" && selectedGroup == null -> LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 12.dp)) {
                 itemsIndexed(artists.keys.toList(), key = { _, name -> name.lowercase() }) { _, name ->
                     val label = artists[name]?.first ?: name
@@ -390,21 +419,8 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
 }
 
 @Composable private fun BlurredAlbumBackground(track: Track, modifier: Modifier = Modifier) {
-    var embedded by remember(track.id) { mutableStateOf<ByteArray?>(null) }
-    val ctx = LocalContext.current
-    LaunchedEffect(track.id) { embedded = withContext(Dispatchers.IO) {
-        runCatching { MediaMetadataRetriever().run { setDataSource(ctx, track.uri); val bytes = embeddedPicture; release(); bytes } }.getOrNull()
-    } }
-    Box(modifier) {
-        AsyncImage(
-            model = embedded ?: track.artUri, contentDescription = null,
-            modifier = Modifier.fillMaxSize().scale(1.05f).blur(14.dp),
-            contentScale = androidx.compose.ui.layout.ContentScale.Crop
-        )
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
-            Color.Black.copy(alpha = .40f), Ink.copy(alpha = .72f), Ink.copy(alpha = .94f)
-        ))))
-    }
+    // Avoid full-screen artwork blur; it causes costly GPU work during every UI update.
+    Box(modifier.background(Brush.verticalGradient(listOf(LocalAccent.current.copy(alpha = .12f), Ink, Ink))))
 }
 
 private fun imageDimensions(context: android.content.Context, uri: Uri): Pair<Int, Int>? = runCatching {
@@ -570,6 +586,7 @@ private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: 
     val lyricListState = key(track.id) { rememberLazyListState() }
     var lyricsInteraction by remember { mutableStateOf(false) }
     val lyrics by produceState<List<TimedLyric>>(emptyList(), track.id, folderTree, rootFolder, refresh) {
+        value = emptyList()
         value = withContext(Dispatchers.IO) { loadLrc(ctx, track, folderTree, rootFolder) }
     }
     val activeLyricIndex = lyrics.indexOfLast { it.timeMs <= pos }.coerceAtLeast(0)
@@ -587,7 +604,13 @@ private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: 
     }
     val scope = rememberCoroutineScope()
     val visuals by produceState<Pair<Uri?, Uri?>>(null to null, track.id, refresh) { value = withContext(Dispatchers.IO) { Store.find(ctx, track, false) to Store.find(ctx, track, true) } }
-    LaunchedEffect(player, track.id) { pos = player.currentPosition.coerceAtLeast(0L); while (true) { pos = player.currentPosition.coerceAtLeast(0L); delay(400) } }
+    LaunchedEffect(player, track.id) {
+        pos = 0L
+        while (true) {
+            if (player.currentMediaItem?.mediaId == track.id.toString()) pos = player.currentPosition.coerceAtLeast(0L)
+            delay(250)
+        }
+    }
     val pickVideo = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) onTrim(uri, pendingLyrics) }
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) { runCatching { ctx.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }; val root = DocumentFile.fromTreeUri(ctx, uri); val files = root?.let { MetadataMatcher.findVideosRecursively(it) }.orEmpty(); matches = MetadataMatcher.match(files, track); if (matches.isNullOrEmpty()) Toast.makeText(ctx, "No video matching ${track.title} found in that folder", Toast.LENGTH_LONG).show() }
