@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0 — 2026-10-20
+
+### Fixed and improved
+- Reduce expensive artwork blur and remove animated lyric color transitions to improve playback-screen responsiveness.
+- Reset synced lyric position and reload the current track's lyrics when playback moves to another song.
+- Group albums by Album Artist metadata instead of MediaStore album IDs that can differ across tracks.
+- Add manual video sync playback and fine-grained offset buttons, including when waveform decoding is unavailable.
+- Apply a selected or cleared album cover to every scanned track in that album.
+
 ## 0.6.0 — 2026-10-20
 
 ### Fixed and improved
