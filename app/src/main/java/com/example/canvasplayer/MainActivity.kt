@@ -267,7 +267,7 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
             }
             OutlinedTextField(genre, { genre = it }, label = { Text("Genre") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(artist, { artist = it }, label = { Text("Artist") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            Text("Multiple artists: use /, feat., or comma. AC/DC remains one artist.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+            Text("Artist tags split on /, feat., and commas. AC/DC, +/-, No/Me, and 25/17 stay intact.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
             OutlinedTextField(album, { album = it }, label = { Text("Album") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(albumArtist, { albumArtist = it }, label = { Text("Album artist") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(composer, { composer = it }, label = { Text("Composer") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -466,7 +466,10 @@ private fun writeTrackTags(context: android.content.Context, edit: TrackEdit) {
             if (value.isBlank()) tag.deleteField(key) else tag.setField(key, value.trim())
         }
         set(FieldKey.TITLE, edit.title); set(FieldKey.TRACK, edit.trackNumber); set(FieldKey.YEAR, edit.year)
-        set(FieldKey.GENRE, edit.genre); set(FieldKey.ARTIST, edit.artist); set(FieldKey.ALBUM, edit.album)
+        set(FieldKey.GENRE, edit.genre)
+        tag.deleteField(FieldKey.ARTIST)
+        splitArtists(edit.artist).forEach { tag.addField(FieldKey.ARTIST, it) }
+        set(FieldKey.ALBUM, edit.album)
         set(FieldKey.ALBUM_ARTIST, edit.albumArtist); set(FieldKey.COMPOSER, edit.composer); set(FieldKey.COMMENT, edit.comment)
         edit.coverUri?.let { uri ->
             val bitmap = context.contentResolver.openInputStream(uri)?.use(BitmapFactory::decodeStream)
@@ -488,4 +491,20 @@ private fun writeTrackTags(context: android.content.Context, edit: TrackEdit) {
     } finally {
         source.delete(); output.delete()
     }
+}
+
+/** Splits multi-artist text while protecting common names that contain a slash. */
+private fun splitArtists(value: String): List<String> {
+    val protected = listOf("AC/DC", "+/-", "No/Me", "25/17")
+    var text = value.trim()
+    protected.forEachIndexed { index, name ->
+        text = text.replace(name, "\u0000ARTIST$index\u0000", ignoreCase = true)
+    }
+    val artists = text.split(Regex("(?i)\\s*(?:/|,|\\bfeat(?:uring)?\\.?|\\bft\\.?)\\s*"))
+        .map(String::trim).filter(String::isNotEmpty)
+    return artists.map { artist ->
+        protected.indices.fold(artist) { current, index ->
+            current.replace("\u0000ARTIST$index\u0000", protected[index], ignoreCase = true)
+        }
+    }.distinctBy { it.lowercase() }
 }
