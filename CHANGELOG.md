@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0 — 2026-10-19
+
+### Fixed and improved
+- Search Deezer cover art inside the app for a song or album, preview actual image dimensions, and apply or clear embedded MP3 artwork.
+- Use album artist metadata to group album tracks consistently.
+- Move library options to the header and anchor player actions to the three-dot button; raise the mini-player and align sync controls.
+- Keep decoded audio in trimmed companion videos and add a duration fallback for waveform generation.
+- Show synced lyrics centered in a scrollable list, animate the active line, seek when a line is tapped, and return to the current line after five seconds of inactivity.
+- Swipe up on artwork for lyrics, down to leave the player, and sideways to change tracks.
+- Initialize yt-dlp and FFmpeg at startup, show initialization errors, and include all supported Android ABIs.
+
+### Notes
+- In-app cover candidates are supplied by Deezer search results and their displayed pixel sizes are read from the image files.
+- Video waveforms require an audio track in the selected video; older silent companions can still be synced with the timing slider.
+
 ## 0.4.0 — 2026-10-19
 
 ### Fixed and improved
