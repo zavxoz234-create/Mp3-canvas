@@ -352,7 +352,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
         }
         val songRows = if (selectedGroup != null) groupTracks.filter { it.title.contains(search, true) } else shown
         when {
-            tracks.isEmpty() || visibleTracks.isEmpty() -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            tracks.isEmpty() -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(if (folder == null) "Choose a music folder to get started" else "No indexed songs found in this folder yet", color = Color.LightGray)
                     if (folder != null) TextButton(onClick = onChooseFolder) { Text("Choose another folder") }
