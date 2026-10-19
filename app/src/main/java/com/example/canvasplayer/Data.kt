@@ -5,7 +5,9 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
 import androidx.media3.common.MediaItem
@@ -26,7 +28,8 @@ import java.text.Normalizer
 
 data class Track(
     val id: Long, val title: String, val artist: String,
-    val album: String, val albumId: Long, val path: String, val durationMs: Long = 0L
+    val album: String, val albumId: Long, val path: String, val durationMs: Long = 0L,
+    val albumArtist: String = ""
 ) {
     val uri: Uri get() = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)
     // Static art only: this is what the lock screen / notification receive.
@@ -37,7 +40,7 @@ data class Track(
         .setUri(uri)
         .setMediaMetadata(
             MediaMetadata.Builder().setTitle(title).setArtist(artist)
-                .setAlbumTitle(album).setArtworkUri(artUri).build()
+                .setAlbumTitle(album).setAlbumArtist(albumArtist.ifBlank { artist }).setArtworkUri(artUri).build()
         ).build()
 }
 
@@ -113,20 +116,23 @@ fun loadLrc(context: Context, track: Track, treeUri: String?, rootFolder: String
 fun loadTracks(c: Context, rootFolder: String? = null): List<Track> {
     val out = mutableListOf<Track>()
     val col = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-    val proj = arrayOf(
+    val baseProj = arrayOf(
         MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST,
         MediaStore.Audio.Media.ALBUM, MediaStore.Audio.Media.ALBUM_ID, MediaStore.Audio.Media.DATA,
         MediaStore.Audio.Media.DURATION
     )
+    val proj = if (Build.VERSION.SDK_INT >= 29) baseProj + MediaStore.Audio.Media.ALBUM_ARTIST else baseProj
     c.contentResolver.query(
         col, proj,
         if (rootFolder.isNullOrBlank()) "${MediaStore.Audio.Media.IS_MUSIC} != 0" else "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DATA} LIKE ?",
         if (rootFolder.isNullOrBlank()) null else arrayOf(rootFolder.trimEnd('/') + "/%"),
         "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE"
     )?.use { cur ->
+        val albumArtistIndex = if (Build.VERSION.SDK_INT >= 29) cur.getColumnIndex(MediaStore.Audio.Media.ALBUM_ARTIST) else -1
         while (cur.moveToNext()) out += Track(
             cur.getLong(0), cur.getString(1) ?: "Unknown", cur.getString(2) ?: "Unknown",
-            cur.getString(3) ?: "", cur.getLong(4), cur.getString(5) ?: "", cur.getLong(6)
+            cur.getString(3) ?: "", cur.getLong(4), cur.getString(5) ?: "", cur.getLong(6),
+            if (albumArtistIndex >= 0) cur.getString(albumArtistIndex).orEmpty() else ""
         )
     }
     return out
@@ -207,17 +213,24 @@ data class WaveformData(val durationMs: Long, val bars: List<Float>)
 
 /** Decodes audio into a small RMS waveform so users can line up a companion video by ear and sight. */
 object WaveformAnalyzer {
-    fun read(context: Context, uri: Uri, bins: Int = 180): WaveformData? {
+    fun read(context: Context, uri: Uri, bins: Int = 180, fallbackPath: String? = null): WaveformData? {
         val extractor = MediaExtractor()
         var decoder: MediaCodec? = null
         try {
-            extractor.setDataSource(context, uri, null)
+            try { extractor.setDataSource(context, uri, null) }
+            catch (first: Exception) {
+                if (fallbackPath.isNullOrBlank()) throw first
+                extractor.setDataSource(fallbackPath)
+            }
             val audioTrack = (0 until extractor.trackCount).firstOrNull {
                 extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
             } ?: return null
             val format = extractor.getTrackFormat(audioTrack)
             val mime = format.getString(MediaFormat.KEY_MIME) ?: return null
-            val durationMs = if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) / 1000L else 0L
+            val durationMs = (if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) / 1000L else 0L)
+                .takeIf { it > 0L } ?: runCatching {
+                    MediaMetadataRetriever().run { setDataSource(context, uri); val duration = extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L; release(); duration }
+                }.getOrDefault(0L)
             if (durationMs <= 0L) return null
             val levels = FloatArray(bins)
             extractor.selectTrack(audioTrack)
@@ -337,6 +350,7 @@ object Exporter {
         val edited = EditedMediaItem.Builder(item).setRemoveAudio(false).setEffects(fx).build()
         Transformer.Builder(ctx)
             .setVideoMimeType(MimeTypes.VIDEO_H264)
+            .setAudioMimeType(MimeTypes.AUDIO_AAC)
             .addListener(object : Transformer.Listener {
                 override fun onCompleted(composition: Composition, exportResult: ExportResult) =
                     done(Result.success(Unit))

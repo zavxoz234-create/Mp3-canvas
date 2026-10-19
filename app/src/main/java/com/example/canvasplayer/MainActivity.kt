@@ -25,6 +25,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -70,6 +74,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToLong
@@ -98,7 +105,8 @@ class MainActivity : ComponentActivity() {
 
 private data class TrimJob(val src: Uri, val lyrics: Boolean, val track: Track)
 private data class DownloadVariant(val id: String, val label: String, val hasAudio: Boolean)
-private data class TrackEdit(val track: Track, val title: String, val trackNumber: String, val year: String, val genre: String, val artist: String, val album: String, val albumArtist: String, val composer: String, val comment: String, val coverUri: Uri?)
+private data class TrackEdit(val track: Track, val title: String, val trackNumber: String, val year: String, val genre: String, val artist: String, val album: String, val albumArtist: String, val composer: String, val comment: String, val coverUri: Uri?, val coverBytes: ByteArray? = null, val clearArtwork: Boolean = false)
+private data class CoverResult(val title: String, val subtitle: String, val bytes: ByteArray, val width: Int, val height: Int)
 
 @Composable private fun App(tracks: List<Track>, player: Player?, onFolderChange: (String?) -> Unit) {
     val ctx = LocalContext.current
@@ -117,8 +125,18 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
     var trim by remember { mutableStateOf<TrimJob?>(null) }
     var pendingEdit by remember { mutableStateOf<TrackEdit?>(null) }
     var editDialogTrack by remember { mutableStateOf<Track?>(null) }
-    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.4.0") }
+    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.5.0") }
+    var ytDlpReady by remember { mutableStateOf<Boolean?>(null) }
+    var ytDlpInitError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    LaunchedEffect(Unit) {
+        val initialized = withContext(Dispatchers.IO) { runCatching {
+            YoutubeDL.getInstance().init(ctx.applicationContext)
+            FFmpeg.getInstance().init(ctx.applicationContext)
+        } }
+        ytDlpReady = initialized.isSuccess
+        ytDlpInitError = initialized.exceptionOrNull()?.message?.take(400)
+    }
     val editPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         val edit = pendingEdit
         pendingEdit = null
@@ -189,10 +207,11 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
                     Toast.makeText(ctx, if (result.isSuccess) "Video saved" else "Export failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                 }
             }
-            inPlayer && player != null && track != null -> PlayerScreen(track, player, playing, shuffle, refresh,
+            inPlayer && player != null && track != null -> PlayerScreen(track, player, playing, shuffle, refresh, ytDlpReady, ytDlpInitError,
                 folderUris.entries.firstOrNull { (root, _) -> track.path.replace("\\", "/").startsWith(root.replace("\\", "/").trimEnd('/') + "/", true) }?.value ?: folderTree,
                 folderRoots.firstOrNull { root -> track.path.replace("\\", "/").startsWith(root.replace("\\", "/").trimEnd('/') + "/", true) } ?: folder,
                 onBack = { inPlayer = false }, onShuffle = { shuffle = !shuffle; player.shuffleModeEnabled = shuffle },
+                onYtDlpInit = { ready, error -> ytDlpReady = ready; ytDlpInitError = error },
                 onTrim = { uri, lyrics -> trim = TrimJob(uri, lyrics, track) }, onChanged = { refresh++ },
                 onEditTrack = { editDialogTrack = track })
             else -> LibraryScreen(visibleTracks, track, playing, folderLabel ?: folderRoots.joinToString(" + ") { File(it).name.ifBlank { it } },
@@ -234,12 +253,12 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
             else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
         }
     } }
-    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.4.0").apply() },
-        title = { Text("Canvas Player 0.4.0") },
+    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.5.0").apply() },
+        title = { Text("Canvas Player 0.5.0") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
             Text("What’s new", style = MaterialTheme.typography.titleMedium)
-            Text("• More reliable yt-dlp format selection, audio muxing, MP4 output, and visible error details\n• Align song and video waveforms by dragging, then fine-tune timing\n• Find sibling .lrc files by song title or audio filename with better folder fallback\n• Use album art as a blurred player background and apply its colors across controls\n• Search Google Images for a song or album with Deezer and 1900x1900 terms; check chosen image dimensions before embedding")
-        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.4.0").apply() }) { Text("Got it") } })
+            Text("• Search and choose high-resolution album covers inside the app\n• Read album artist tags when grouping albums\n• Repair companion audio for visible sync waveforms\n• Animate, center, scroll, and tap synced lyric lines to seek\n• Swipe the artwork to open lyrics, leave the player, or change songs\n• Move library options and fix player menu anchoring")
+        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.5.0").apply() }) { Text("Got it") } })
     } }
 }
 
@@ -252,11 +271,17 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
     val shown = tracks.filter { it.title.contains(search, true) || it.artist.contains(search, true) || it.album.contains(search, true) }
     val artists = tracks.flatMap { track -> splitArtists(track.artist).ifEmpty { listOf("Unknown artist") }.map { it to track } }
         .groupBy({ it.first }, { it.second }).toSortedMap(String.CASE_INSENSITIVE_ORDER)
-    val albums = tracks.groupBy { "${it.album.ifBlank { "Unknown album" }}\u0000${it.artist}" }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+    val albums = tracks.groupBy { "${it.album.ifBlank { "Unknown album" }}\u0000${it.albumArtist.ifBlank { it.artist }}" }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column { Text("CANVAS", style = MaterialTheme.typography.labelLarge, color = LocalAccent.current); Text("Your music", style = MaterialTheme.typography.headlineMedium) }
-            IconButton(onClick = onChooseFolder) { Icon(Icons.Default.CreateNewFolder, "Add music folder", tint = LocalAccent.current) }
+            Box {
+                IconButton(onClick = { listMenu = true }) { Icon(Icons.Default.MoreVert, "Library options", tint = LocalAccent.current) }
+                DropdownMenu(listMenu, { listMenu = false }) {
+                    DropdownMenuItem(text = { Text("Add music folder") }, onClick = { listMenu = false; onChooseFolder() })
+                    if (folder != null) DropdownMenuItem(text = { Text("Clear scanned folders") }, onClick = { listMenu = false; onClearFolder() })
+                }
+            }
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(folder?.let { "Scanning selected folders: $it" } ?: "Choose one or more music folders", color = Color.LightGray, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -269,10 +294,6 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
             IconButton(onClick = onShuffle, enabled = tracks.isNotEmpty()) { Icon(Icons.Default.Shuffle, "Shuffle songs", tint = LocalAccent.current) }
             Text("Shuffle", color = Color.LightGray, modifier = Modifier.clickable(enabled = tracks.isNotEmpty(), onClick = onShuffle))
             Spacer(Modifier.weight(1f))
-            Box { IconButton(onClick = { listMenu = true }) { Icon(Icons.Default.MoreVert, "Library options") }; DropdownMenu(listMenu, { listMenu = false }) {
-                DropdownMenuItem(text = { Text("Add music folder") }, onClick = { listMenu = false; onChooseFolder() })
-                if (folder != null) DropdownMenuItem(text = { Text("Clear scanned folders") }, onClick = { listMenu = false; onClearFolder() })
-            } }
         }
         val groupKey = selectedGroup
         val groupCount = if (groupKey == null) 0 else if (section == "Artists") artists[groupKey].orEmpty().size else albums[groupKey].orEmpty().size
@@ -302,7 +323,7 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
                     val songs = albums[key].orEmpty(); val sample = songs.firstOrNull(); val title = key.substringBefore('\u0000')
                     Row(Modifier.fillMaxWidth().clickable { selectedGroup = key }.padding(vertical = 8.dp, horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         sample?.let { AlbumArt(it, Modifier.size(56.dp).clip(RoundedCornerShape(12.dp))) }
-                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) { Text(title, style = MaterialTheme.typography.titleMedium); Text(sample?.artist.orEmpty(), color = Color.LightGray) }
+                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) { Text(title, style = MaterialTheme.typography.titleMedium); Text(sample?.albumArtist?.ifBlank { sample.artist }.orEmpty(), color = Color.LightGray) }
                         IconButton(onClick = { selectedGroup = key }) { Icon(Icons.Default.ChevronRight, "Open album $title") }
                     }
                 }
@@ -323,7 +344,7 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
             }
         }
         current?.let { t ->
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).clip(RoundedCornerShape(18.dp)).background(Panel).clickable { onMiniOpen() }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).padding(bottom = 24.dp).clip(RoundedCornerShape(18.dp)).background(Panel).clickable { onMiniOpen() }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 AlbumArt(t, Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)))
                 Column(Modifier.weight(1f).padding(horizontal = 10.dp)) { Text(t.title, maxLines = 1, overflow = TextOverflow.Ellipsis); Text(t.artist, style = MaterialTheme.typography.bodySmall, color = Color.LightGray) }
                 IconButton(onClick = onMiniPlay) { Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, "Play or pause", tint = LocalAccent.current) }
@@ -370,39 +391,125 @@ private fun imageDimensions(context: android.content.Context, uri: Uri): Pair<In
     if (options.outWidth > 0 && options.outHeight > 0) options.outWidth to options.outHeight else null
 }.getOrNull()
 
-private fun openGoogleImageSearch(context: android.content.Context, query: String) {
-    val url = Uri.parse("https://www.google.com/search?tbm=isch&q=${Uri.encode(query)}")
-    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, url)) }
-        .onFailure { Toast.makeText(context, "Could not open Google Images: ${it.message}", Toast.LENGTH_LONG).show() }
+@Composable private fun CoverArtDialog(track: Track, onDismiss: () -> Unit, onSelect: (ByteArray?, Boolean) -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var albumMode by remember { mutableStateOf(false) }
+    var highResolution by remember { mutableStateOf(true) }
+    var query by remember(track.id) { mutableStateOf("${track.title} ${track.artist}") }
+    var results by remember { mutableStateOf<List<CoverResult>>(emptyList()) }
+    var searching by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var embedded by remember(track.id) { mutableStateOf<ByteArray?>(null) }
+    LaunchedEffect(track.id) { embedded = withContext(Dispatchers.IO) {
+        runCatching { MediaMetadataRetriever().run { setDataSource(ctx, track.uri); val bytes = embeddedPicture; release(); bytes } }.getOrNull()
+    } }
+    fun search() {
+        searching = true; error = null
+        scope.launch {
+            val fetched = withContext(Dispatchers.IO) { runCatching { searchDeezerCovers(query.trim(), albumMode, highResolution) } }
+            searching = false
+            if (fetched.isSuccess) { results = fetched.getOrDefault(emptyList()); if (results.isEmpty()) error = "No cover results found. Try another search." }
+            else error = fetched.exceptionOrNull()?.message?.take(250) ?: "Cover search failed"
+        }
+    }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Find album art") },
+        text = { Column(Modifier.heightIn(max = 580.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(highResolution, { highResolution = it })
+                Text("High Resolution", modifier = Modifier.weight(1f))
+                Icon(Icons.Default.Settings, "Deezer artwork search")
+            }
+            OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), label = { Text(if (albumMode) "Album and artist" else "Song and artist") }, singleLine = true)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(!albumMode, { albumMode = false; query = "${track.title} ${track.artist}" }, label = { Text("Song") })
+                FilterChip(albumMode, { albumMode = true; query = "${track.album} ${track.albumArtist.ifBlank { track.artist }}" }, label = { Text("Album") })
+                Button(onClick = ::search, enabled = !searching && query.isNotBlank()) { Text(if (searching) "Searching…" else "Search") }
+            }
+            if (searching) LinearProgressIndicator(Modifier.fillMaxWidth())
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onSelect(null, true) }, horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(Modifier.fillMaxWidth().aspectRatio(1f).background(Panel), contentAlignment = Alignment.Center) { Icon(Icons.Default.MusicNote, null, tint = Color.Gray, modifier = Modifier.size(44.dp)) }
+                    Text("No album art", style = MaterialTheme.typography.labelMedium)
+                }
+                Column(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable(enabled = embedded != null) { embedded?.let { onSelect(it, false) } }, horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(Modifier.fillMaxWidth().aspectRatio(1f).background(Panel), contentAlignment = Alignment.Center) {
+                        if (embedded != null) AsyncImage(embedded, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                        else Icon(Icons.Default.MusicNote, null, tint = Color.Gray, modifier = Modifier.size(44.dp))
+                    }
+                    Text("Embedded album art", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            results.chunked(2).forEach { pair -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                pair.forEach { result -> Column(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onSelect(result.bytes, false) }, horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(Modifier.fillMaxWidth().aspectRatio(1f).background(Panel), contentAlignment = Alignment.Center) {
+                        AsyncImage(result.bytes, result.title, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                        Text("${result.width}×${result.height}", Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp).clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = .82f)).padding(horizontal = 9.dp, vertical = 4.dp), color = Color.White, style = MaterialTheme.typography.labelMedium)
+                    }
+                    Text(result.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+                } }
+                if (pair.size == 1) Spacer(Modifier.weight(1f))
+            } }
+        } }, confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } })
+}
+
+private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: Boolean): List<CoverResult> {
+    val endpoint = if (byAlbum) "album" else "track"
+    val api = URL("https://api.deezer.com/search/$endpoint?q=${Uri.encode(query)}&limit=12")
+    val json = api.openConnection().apply { connectTimeout = 12_000; readTimeout = 15_000; setRequestProperty("User-Agent", "CanvasPlayer/0.5.0") }
+        .getInputStream().bufferedReader().use { it.readText() }
+    val data = JSONObject(json).optJSONArray("data") ?: return emptyList()
+    return (0 until data.length()).mapNotNull { index ->
+        val item = data.optJSONObject(index) ?: return@mapNotNull null
+        val album = if (byAlbum) item else item.optJSONObject("album") ?: return@mapNotNull null
+        val imageUrl = album.optString(if (highResolution) "cover_xl" else "cover_big").takeIf { it.startsWith("https://") }
+            ?: album.optString("cover_big").takeIf { it.startsWith("https://") }
+            ?: return@mapNotNull null
+        runCatching {
+            val connection = URL(imageUrl).openConnection().apply { connectTimeout = 12_000; readTimeout = 15_000; setRequestProperty("User-Agent", "CanvasPlayer/0.5.0") }
+            val bytes = connection.getInputStream().use { it.readBytes() }
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+            CoverResult(item.optString("title", album.optString("title")), album.optString("title"), bytes, bounds.outWidth, bounds.outHeight)
+        }.getOrNull()
+    }.filterNotNull()
 }
 
 @Composable private fun EditTrackDialog(track: Track, onDismiss: () -> Unit, onSave: (TrackEdit) -> Unit) {
     var title by remember(track.id) { mutableStateOf(track.title) }
     var trackNo by remember(track.id) { mutableStateOf("") }; var year by remember(track.id) { mutableStateOf("") }
     var genre by remember(track.id) { mutableStateOf("") }; var artist by remember(track.id) { mutableStateOf(track.artist) }
-    var album by remember(track.id) { mutableStateOf(track.album) }; var albumArtist by remember(track.id) { mutableStateOf("") }
+    var album by remember(track.id) { mutableStateOf(track.album) }; var albumArtist by remember(track.id) { mutableStateOf(track.albumArtist) }
     var composer by remember(track.id) { mutableStateOf("") }; var comment by remember(track.id) { mutableStateOf("") }
     var cover by remember(track.id) { mutableStateOf<Uri?>(null) }
+    var coverBytes by remember(track.id) { mutableStateOf<ByteArray?>(null) }
+    var clearArtwork by remember(track.id) { mutableStateOf(false) }
     var coverDimensions by remember(track.id) { mutableStateOf<Pair<Int, Int>?>(null) }
+    var showCoverFinder by remember(track.id) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     val coverPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { selected ->
-        cover = selected; coverDimensions = null
+        cover = selected; coverBytes = null; clearArtwork = false; coverDimensions = null
         if (selected != null) scope.launch { coverDimensions = withContext(Dispatchers.IO) { imageDimensions(ctx, selected) } }
     }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Edit tags") },
+    if (showCoverFinder) CoverArtDialog(track, onDismiss = { showCoverFinder = false }) { bytes, remove ->
+        coverBytes = bytes; cover = null; clearArtwork = remove
+        coverDimensions = bytes?.let { data ->
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }; BitmapFactory.decodeByteArray(data, 0, data.size, options)
+            options.outWidth to options.outHeight
+        }
+        showCoverFinder = false
+    } else AlertDialog(onDismissRequest = onDismiss, title = { Text("Edit tags") },
         text = { Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Text(track.path.substringAfterLast('/'), color = Color.LightGray, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (cover != null) AsyncImage(cover, null, Modifier.size(72.dp).clip(RoundedCornerShape(10.dp))) else AlbumArt(track, Modifier.size(72.dp).clip(RoundedCornerShape(10.dp)))
-                Spacer(Modifier.width(12.dp)); OutlinedButton(onClick = { coverPicker.launch("image/*") }) { Icon(Icons.Default.Image, null); Spacer(Modifier.width(6.dp)); Text("Album art") }
+                when { coverBytes != null -> AsyncImage(coverBytes, null, Modifier.size(72.dp).clip(RoundedCornerShape(10.dp))); cover != null -> AsyncImage(cover, null, Modifier.size(72.dp).clip(RoundedCornerShape(10.dp))); else -> AlbumArt(track, Modifier.size(72.dp).clip(RoundedCornerShape(10.dp))) }
+                Spacer(Modifier.width(8.dp)); OutlinedButton(onClick = { showCoverFinder = true }) { Icon(Icons.Default.Search, null); Spacer(Modifier.width(4.dp)); Text("Find art") }
+                Spacer(Modifier.width(4.dp)); IconButton(onClick = { coverPicker.launch("image/*") }) { Icon(Icons.Default.Image, "Choose from gallery") }
             }
             coverDimensions?.let { (width, height) -> Text("Selected image: ${width} × ${height} px", color = LocalAccent.current, style = MaterialTheme.typography.bodySmall) }
-            Text("Search Google Images, choose and save a cover, then select it above. Dimensions appear here before saving to the MP3.", color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { openGoogleImageSearch(ctx, "${track.title} ${track.artist} deezer 1900x1900 album cover") }) { Text("Google: song") }
-                TextButton(onClick = { openGoogleImageSearch(ctx, "${track.album} ${track.artist} deezer 1900x1900 album cover") }, enabled = track.album.isNotBlank()) { Text("Google: album") }
-            }
             OutlinedTextField(title, { title = it }, label = { Text("Title") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(trackNo, { trackNo = it }, label = { Text("Track") }, singleLine = true, modifier = Modifier.weight(1f))
@@ -416,11 +523,11 @@ private fun openGoogleImageSearch(context: android.content.Context, query: Strin
             OutlinedTextField(composer, { composer = it }, label = { Text("Composer") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(comment, { comment = it }, label = { Text("Comment") }, modifier = Modifier.fillMaxWidth())
         } },
-        confirmButton = { TextButton(onClick = { onSave(TrackEdit(track, title, trackNo, year, genre, artist, album, albumArtist, composer, comment, cover)) }) { Text("Save to MP3") } },
+        confirmButton = { TextButton(onClick = { onSave(TrackEdit(track, title, trackNo, year, genre, artist, album, albumArtist, composer, comment, cover, coverBytes, clearArtwork)) }) { Text("Save to MP3") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
-@Composable private fun PlayerScreen(track: Track, player: Player, playing: Boolean, shuffle: Boolean, refresh: Int, folderTree: String?, rootFolder: String?, onBack: () -> Unit, onShuffle: () -> Unit, onTrim: (Uri, Boolean) -> Unit, onChanged: () -> Unit, onEditTrack: () -> Unit) {
+@Composable private fun PlayerScreen(track: Track, player: Player, playing: Boolean, shuffle: Boolean, refresh: Int, ytDlpReady: Boolean?, ytDlpInitError: String?, folderTree: String?, rootFolder: String?, onBack: () -> Unit, onShuffle: () -> Unit, onYtDlpInit: (Boolean, String?) -> Unit, onTrim: (Uri, Boolean) -> Unit, onChanged: () -> Unit, onEditTrack: () -> Unit) {
     val ctx = LocalContext.current
     var lyricsMode by remember { mutableStateOf(false) }; var menu by remember { mutableStateOf(false) }; var pendingLyrics by remember { mutableStateOf(false) }; var matches by remember { mutableStateOf<List<DocumentFile>?>(null) }; var pos by remember { mutableLongStateOf(0L) }
     val syncPrefs = remember { ctx.getSharedPreferences("video_sync", 0) }
@@ -431,6 +538,16 @@ private fun openGoogleImageSearch(context: android.content.Context, query: Strin
     var loadingWaveforms by remember { mutableStateOf(false) }
     var downloadDialog by remember { mutableStateOf(false) }; var downloadUrl by remember { mutableStateOf("") }; var downloading by remember { mutableStateOf(false) }; var downloadProgress by remember { mutableFloatStateOf(0f) }; var updatingYtDlp by remember { mutableStateOf(false) }; var removeSponsorSegments by remember { mutableStateOf(false) }; var ytDlpError by remember { mutableStateOf<String?>(null) }
     var lookingUp by remember { mutableStateOf(false) }; var variants by remember { mutableStateOf<List<DownloadVariant>>(emptyList()) }; var selectedVariant by remember { mutableStateOf<String?>(null) }
+    val lyricListState = rememberLazyListState()
+    var lyricsInteraction by remember { mutableStateOf(false) }
+    val activeLyricIndex = lyrics.indexOfLast { it.timeMs <= pos }.coerceAtLeast(0)
+    LaunchedEffect(lyricListState.isScrollInProgress) {
+        if (lyricListState.isScrollInProgress) lyricsInteraction = true
+        else { delay(5_000); lyricsInteraction = false }
+    }
+    LaunchedEffect(lyricsMode, lyrics.size, activeLyricIndex, lyricsInteraction) {
+        if (lyricsMode && lyrics.isNotEmpty() && !lyricsInteraction) lyricListState.animateScrollToItem(activeLyricIndex)
+    }
     val scope = rememberCoroutineScope()
     val visuals by produceState<Pair<Uri?, Uri?>>(null to null, track.id, refresh) { value = withContext(Dispatchers.IO) { Store.find(ctx, track, false) to Store.find(ctx, track, true) } }
     val lyrics by produceState<List<TimedLyric>>(emptyList(), track.id, folderTree, rootFolder, refresh) {
@@ -442,11 +559,22 @@ private fun openGoogleImageSearch(context: android.content.Context, query: Strin
         if (uri != null) { runCatching { ctx.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }; val root = DocumentFile.fromTreeUri(ctx, uri); val files = root?.let { MetadataMatcher.findVideosRecursively(it) }.orEmpty(); matches = MetadataMatcher.match(files, track); if (matches.isNullOrEmpty()) Toast.makeText(ctx, "No video matching ${track.title} found in that folder", Toast.LENGTH_LONG).show() }
     }
     val video = if (lyricsMode) visuals.second ?: visuals.first else visuals.first
+    val swipeThreshold = with(androidx.compose.ui.platform.LocalDensity.current) { 72.dp.toPx() }
+    val artworkGestures = Modifier.pointerInput(track.id) {
+        var dragX = 0f; var dragY = 0f
+        detectDragGestures(onDragStart = { dragX = 0f; dragY = 0f }, onDragEnd = {
+            if (kotlin.math.abs(dragX) > swipeThreshold && kotlin.math.abs(dragX) > kotlin.math.abs(dragY)) {
+                if (dragX > 0) player.seekToPreviousMediaItem() else player.seekToNextMediaItem()
+            } else if (kotlin.math.abs(dragY) > swipeThreshold && kotlin.math.abs(dragY) > kotlin.math.abs(dragX)) {
+                if (dragY < 0) lyricsMode = true else onBack()
+            }
+        }) { change, amount -> change.consume(); dragX += amount.x; dragY += amount.y }
+    }
     LaunchedEffect(syncDialog, track.id, video) {
         if (syncDialog && video != null) {
             loadingWaveforms = true
             val data = withContext(Dispatchers.IO) {
-                WaveformAnalyzer.read(ctx, track.uri) to WaveformAnalyzer.read(ctx, video)
+                WaveformAnalyzer.read(ctx, track.uri, fallbackPath = track.path) to WaveformAnalyzer.read(ctx, video)
             }
             audioWaveform = data.first; videoWaveform = data.second
             loadingWaveforms = false
@@ -455,15 +583,45 @@ private fun openGoogleImageSearch(context: android.content.Context, query: Strin
     Box(Modifier.fillMaxSize()) {
     BlurredAlbumBackground(track, Modifier.matchParentSize())
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("NOW PLAYING", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = LocalAccent.current); IconButton(onClick = onEditTrack) { Icon(Icons.Default.Edit, "Edit song tags") }; IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More options") } }
+        Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
+            Text("NOW PLAYING", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = LocalAccent.current)
+            IconButton(onClick = onEditTrack) { Icon(Icons.Default.Edit, "Edit song tags") }
+            Box {
+                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More options") }
+                DropdownMenu(menu, { menu = false }) {
+                    DropdownMenuItem(text = { Text("Edit song tags") }, onClick = { menu = false; onEditTrack() })
+                    DropdownMenuItem(text = { Text("Sync video to song") }, onClick = { menu = false; syncDialog = true })
+                    DropdownMenuItem(text = { Text("Check for matching video") }, onClick = { menu = false; scope.launch {
+                        val local = withContext(Dispatchers.IO) { Store.find(ctx, track, false) }
+                        if (local != null) Toast.makeText(ctx, "Video found and shown for ${track.title}", Toast.LENGTH_LONG).show()
+                        else if (!folderTree.isNullOrBlank()) {
+                            val found = withContext(Dispatchers.IO) { DocumentFile.fromTreeUri(ctx, Uri.parse(folderTree))?.let { root -> MetadataMatcher.match(MetadataMatcher.findVideosRecursively(root), track) }.orEmpty() }
+                            if (found.isNotEmpty()) matches = found else Toast.makeText(ctx, "No matching video found. Pick a video file or folder.", Toast.LENGTH_LONG).show()
+                        } else Toast.makeText(ctx, "No matching video found. Pick a video file or folder.", Toast.LENGTH_LONG).show()
+                        onChanged()
+                    } })
+                    DropdownMenuItem(text = { Text("Choose video file") }, onClick = { menu = false; pendingLyrics = false; pickVideo.launch("video/*") })
+                    DropdownMenuItem(text = { Text("Find video in folder") }, onClick = { menu = false; pendingLyrics = false; pickFolder.launch(null) })
+                    DropdownMenuItem(text = { Text("Choose lyrics video") }, onClick = { menu = false; pendingLyrics = true; pickVideo.launch("video/*") })
+                    DropdownMenuItem(text = { Text("Download video with yt-dlp") }, onClick = { menu = false; downloadUrl = ""; variants = emptyList(); selectedVariant = null; downloadDialog = true })
+                    DropdownMenuItem(text = { Text("Remove companion videos") }, onClick = { menu = false; Store.appFile(ctx, track, false).delete(); Store.appFile(ctx, track, true).delete(); onChanged() })
+                }
+            }
+        }
         Spacer(Modifier.weight(.4f))
-        Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(26.dp)).background(Panel)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(26.dp)).background(Panel).then(artworkGestures)) {
             if (lyricsMode && lyrics.isNotEmpty()) {
-                val active = lyrics.indexOfLast { it.timeMs <= pos }.coerceAtLeast(0)
-                Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(lyrics.getOrNull(active - 1)?.text.orEmpty(), color = Color.Gray, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(22.dp)); Text(lyrics.getOrNull(active)?.text.orEmpty(), style = MaterialTheme.typography.headlineSmall, color = LocalAccent.current, maxLines = 4, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(22.dp)); Text(lyrics.getOrNull(active + 1)?.text.orEmpty(), color = Color.Gray, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                LazyColumn(state = lyricListState, modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp), contentPadding = PaddingValues(vertical = 104.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    itemsIndexed(lyrics, key = { index, line -> "${line.timeMs}-$index" }) { index, line ->
+                        val activeColor by animateColorAsState(if (index == activeLyricIndex) LocalAccent.current else Color.LightGray.copy(alpha = .72f), label = "lyric-color")
+                        Text(line.text, modifier = Modifier.fillMaxWidth().clickable {
+                            player.seekTo(line.timeMs); pos = line.timeMs; lyricsInteraction = true
+                            scope.launch { delay(5_000); lyricsInteraction = false }
+                        }.padding(vertical = 11.dp, horizontal = 8.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            style = if (index == activeLyricIndex) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.bodyLarge,
+                            color = activeColor, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             } else if (lyricsMode && lyrics.isEmpty()) Text("No synced lyrics found. Put ${track.title}.lrc beside the song.", color = Color.LightGray, modifier = Modifier.align(Alignment.Center).padding(24.dp))
             else if (video != null) ArtBox(video, track.artUri, player, videoOffset, Modifier.fillMaxSize()) else AlbumArt(track, Modifier.fillMaxSize())
@@ -483,30 +641,9 @@ private fun openGoogleImageSearch(context: android.content.Context, query: Strin
             FilledIconButton(onClick = { if (playing) player.pause() else player.play() }, modifier = Modifier.size(72.dp), shape = CircleShape) { Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, if (playing) "Pause" else "Play", modifier = Modifier.size(38.dp)) }
             IconButton(onClick = { player.seekToNextMediaItem() }, modifier = Modifier.size(58.dp)) { Icon(Icons.Default.SkipNext, "Next", modifier = Modifier.size(38.dp)) }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onShuffle) { Icon(Icons.Default.Shuffle, "Shuffle", tint = if (shuffle) LocalAccent.current else Color.Gray) }
             IconButton(onClick = { syncDialog = true }, enabled = video != null) { Icon(Icons.Default.Sync, "Sync companion video", tint = if (video != null) LocalAccent.current else Color.Gray) }
-            Box { DropdownMenu(menu, { menu = false }) {
-                DropdownMenuItem(text = { Text("Edit song tags") }, onClick = { menu = false; onEditTrack() })
-                DropdownMenuItem(text = { Text("Sync video to song") }, onClick = { menu = false; syncDialog = true })
-                DropdownMenuItem(text = { Text("Check for matching video") }, onClick = { menu = false; scope.launch {
-                    val local = withContext(Dispatchers.IO) { Store.find(ctx, track, false) }
-                    if (local != null) Toast.makeText(ctx, "Video found and shown for ${track.title}", Toast.LENGTH_LONG).show()
-                    else if (!folderTree.isNullOrBlank()) {
-                        val found = withContext(Dispatchers.IO) {
-                            DocumentFile.fromTreeUri(ctx, Uri.parse(folderTree))?.let { root -> MetadataMatcher.match(MetadataMatcher.findVideosRecursively(root), track) }.orEmpty()
-                        }
-                        if (found.isNotEmpty()) matches = found
-                        else Toast.makeText(ctx, "No matching video found. Pick a video file or folder.", Toast.LENGTH_LONG).show()
-                    } else Toast.makeText(ctx, "No matching video found. Pick a video file or folder.", Toast.LENGTH_LONG).show()
-                    onChanged()
-                } })
-                DropdownMenuItem(text = { Text("Choose video file") }, onClick = { menu = false; pendingLyrics = false; pickVideo.launch("video/*") })
-                DropdownMenuItem(text = { Text("Find video in folder") }, onClick = { menu = false; pendingLyrics = false; pickFolder.launch(null) })
-                DropdownMenuItem(text = { Text("Choose lyrics video") }, onClick = { menu = false; pendingLyrics = true; pickVideo.launch("video/*") })
-                DropdownMenuItem(text = { Text("Download video with yt-dlp") }, onClick = { menu = false; downloadUrl = ""; variants = emptyList(); selectedVariant = null; downloadDialog = true })
-                DropdownMenuItem(text = { Text("Remove companion videos") }, onClick = { menu = false; Store.appFile(ctx, track, false).delete(); Store.appFile(ctx, track, true).delete(); onChanged() })
-            } }
         }
         Spacer(Modifier.weight(.4f))
     }
@@ -517,7 +654,10 @@ private fun openGoogleImageSearch(context: android.content.Context, query: Strin
             Text("White is the song; color is the video. Drag the video waveform to line up a matching beat, then fine-tune below.", color = Color.LightGray)
             if (loadingWaveforms) LinearProgressIndicator(Modifier.fillMaxWidth())
             if (audioWaveform != null || videoWaveform != null) SyncWaveforms(audioWaveform, videoWaveform, track.durationMs, videoOffset) { videoOffset = it }
-            if (!loadingWaveforms && videoWaveform == null) Text("No audio waveform was found inside this video. You can still adjust the sync below.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+            if (!loadingWaveforms && (audioWaveform == null || videoWaveform == null)) Text(
+                listOfNotNull(if (audioWaveform == null) "Could not decode the song waveform." else null, if (videoWaveform == null) "This video has no readable audio waveform." else null).joinToString(" ") + " You can still adjust sync below.",
+                color = Color.Gray, style = MaterialTheme.typography.bodySmall
+            )
             Slider(value = videoOffset.toFloat(), onValueChange = { videoOffset = it.toLong() }, valueRange = -30_000f..30_000f)
             Text("${if (videoOffset >= 0) "+" else "−"}${formatTime(kotlin.math.abs(videoOffset))}", color = LocalAccent.current)
         } }, confirmButton = { TextButton(onClick = { syncPrefs.edit().putLong("offset_${track.id}", videoOffset).apply(); syncDialog = false }) { Text("Save") } },
@@ -526,17 +666,29 @@ private fun openGoogleImageSearch(context: android.content.Context, query: Strin
         onDismissRequest = { if (!downloading) downloadDialog = false },
         title = { Text("Download a companion video") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            when (ytDlpReady) {
+                true -> Text("yt-dlp and FFmpeg are ready.", color = LocalAccent.current, style = MaterialTheme.typography.bodySmall)
+                false -> Text("yt-dlp failed to initialize: ${ytDlpInitError ?: "unknown initialization error"}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                null -> Text("Preparing yt-dlp and FFmpeg…", color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
+            }
             OutlinedTextField(downloadUrl, { downloadUrl = it }, label = { Text("Video URL") }, placeholder = { Text("https://…") }, singleLine = true, enabled = !downloading)
             Text("Choose one of the formats below before downloading. Nothing downloads until you select a format and tap Download.", style = MaterialTheme.typography.bodySmall, color = Color.LightGray)
             TextButton(enabled = !updatingYtDlp && !downloading, onClick = {
                 updatingYtDlp = true; ytDlpError = null
                 scope.launch {
-                    val updated = withContext(Dispatchers.IO) { runCatching {
+                    val initialized = withContext(Dispatchers.IO) { runCatching {
                         YoutubeDL.getInstance().init(ctx.applicationContext)
                         FFmpeg.getInstance().init(ctx.applicationContext)
-                        YoutubeDL.getInstance().updateYoutubeDL(ctx.applicationContext, YoutubeDL.UpdateChannel.STABLE)
                     } }
+                    onYtDlpInit(initialized.isSuccess, initialized.exceptionOrNull()?.message)
+                    if (initialized.isFailure) {
+                        updatingYtDlp = false
+                        ytDlpError = initialized.exceptionOrNull()?.message?.take(500) ?: "Initialization failed"
+                        return@launch
+                    }
+                    val updated = withContext(Dispatchers.IO) { runCatching { YoutubeDL.getInstance().updateYoutubeDL(ctx.applicationContext, YoutubeDL.UpdateChannel.STABLE) } }
                     updatingYtDlp = false
+                    onYtDlpInit(true, null)
                     if (updated.isFailure) ytDlpError = updated.exceptionOrNull()?.message?.take(500) ?: "Unknown yt-dlp update error"
                     Toast.makeText(ctx, if (updated.isSuccess) "yt-dlp is ready: ${updated.getOrNull()}" else "Could not update yt-dlp: ${updated.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                 }
@@ -559,10 +711,14 @@ private fun openGoogleImageSearch(context: android.content.Context, query: Strin
             TextButton(enabled = !downloading && !lookingUp && downloadUrl.startsWith("http") && variants.isEmpty(), onClick = {
                 lookingUp = true
                 scope.launch {
-                    val result = withContext(Dispatchers.IO) {
+                    val initialized = withContext(Dispatchers.IO) { runCatching {
+                        YoutubeDL.getInstance().init(ctx.applicationContext)
+                        FFmpeg.getInstance().init(ctx.applicationContext)
+                    } }
+                    onYtDlpInit(initialized.isSuccess, initialized.exceptionOrNull()?.message)
+                    val result: Result<List<DownloadVariant>> = if (initialized.isFailure) Result.failure(initialized.exceptionOrNull()!!)
+                    else withContext(Dispatchers.IO) {
                         runCatching {
-                            YoutubeDL.getInstance().init(ctx.applicationContext)
-                            FFmpeg.getInstance().init(ctx.applicationContext)
                             val info = runCatching { YoutubeDL.getInstance().getInfo(downloadUrl.trim()) }.recoverCatching {
                                 YoutubeDL.getInstance().updateYoutubeDL(ctx.applicationContext, YoutubeDL.UpdateChannel.STABLE)
                                 YoutubeDL.getInstance().getInfo(downloadUrl.trim())
@@ -766,16 +922,18 @@ private fun writeTrackTags(context: android.content.Context, edit: TrackEdit) {
         splitArtists(edit.artist).forEach { tag.addField(FieldKey.ARTIST, it) }
         set(FieldKey.ALBUM, edit.album)
         set(FieldKey.ALBUM_ARTIST, edit.albumArtist); set(FieldKey.COMPOSER, edit.composer); set(FieldKey.COMMENT, edit.comment)
-        edit.coverUri?.let { uri ->
-            val bitmap = context.contentResolver.openInputStream(uri)?.use(BitmapFactory::decodeStream)
+        if (edit.clearArtwork) tag.deleteArtworkField()
+        val imageBytes = edit.coverBytes ?: edit.coverUri?.let { uri -> context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }
+        imageBytes?.let { bytes ->
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 ?: error("Could not read the selected cover image")
-            val bytes = ByteArrayOutputStream().use { stream ->
+            val embeddedBytes = ByteArrayOutputStream().use { stream ->
                 if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 92, stream)) error("Could not encode cover image")
                 bitmap.recycle()
                 stream.toByteArray()
             }
             val artwork = ArtworkFactory.getNew()
-            artwork.setBinaryData(bytes); artwork.setMimeType("image/jpeg"); artwork.setPictureType(3)
+            artwork.setBinaryData(embeddedBytes); artwork.setMimeType("image/jpeg"); artwork.setPictureType(3)
             tag.deleteArtworkField(); tag.setField(artwork)
         }
         AudioFileIO.write(audio)
