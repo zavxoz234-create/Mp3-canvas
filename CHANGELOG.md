@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 — 2026-10-19
+
+### Fixed and improved
+- Make `.lrc` discovery work directly beside the MP3 and fall back to the selected SAF folder when Android reports a different storage path. Handle UTF-8/UTF-16 files and standard synced timestamps.
+- Improve yt-dlp downloads by retrying with the current stable engine after lookup/download errors, combining video-only formats with audio, creating a consistent MP4 output, and showing actionable errors in the app.
+- Add draggable song/video audio waveforms for visual sync, retain source audio in saved video companions for waveform analysis, and keep the fine timing control.
+- Use blurred album art behind the now-playing screen and apply the album-derived accent to buttons, sliders, and selected controls.
+- Add Google Images song and album searches using Deezer and 1900x1900 terms, and show the selected cover image dimensions before embedding it.
+- Show the v0.4.0 changelog once after the first launch of this version.
+
+### Notes
+- Google Images opens externally; save a chosen result, then pick it in the tag editor. The app shows its pixel dimensions before saving it into the MP3.
+- Waveform alignment is a visual aid; use the timing slider for fine adjustment and listen to confirm.
+
 ## 0.3.0 — 2026-10-19
 
 ### Fixed and improved
