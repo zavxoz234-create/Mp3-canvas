@@ -3,6 +3,7 @@ package com.example.canvasplayer
 import android.Manifest
 import android.content.ComponentName
 import android.content.ContentValues
+import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -21,7 +22,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.IntentSenderRequest
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -36,8 +39,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -63,6 +71,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.max
+import kotlin.math.roundToLong
 
 private val Ink = Color(0xFF101714)
 private val Panel = Color(0xFF1B2420)
@@ -87,7 +97,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private data class TrimJob(val src: Uri, val lyrics: Boolean, val track: Track)
-private data class DownloadVariant(val id: String, val label: String)
+private data class DownloadVariant(val id: String, val label: String, val hasAudio: Boolean)
 private data class TrackEdit(val track: Track, val title: String, val trackNumber: String, val year: String, val genre: String, val artist: String, val album: String, val albumArtist: String, val composer: String, val comment: String, val coverUri: Uri?)
 
 @Composable private fun App(tracks: List<Track>, player: Player?, onFolderChange: (String?) -> Unit) {
@@ -107,7 +117,7 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
     var trim by remember { mutableStateOf<TrimJob?>(null) }
     var pendingEdit by remember { mutableStateOf<TrackEdit?>(null) }
     var editDialogTrack by remember { mutableStateOf<Track?>(null) }
-    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.3.0") }
+    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.4.0") }
     val scope = rememberCoroutineScope()
     val editPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         val edit = pendingEdit
@@ -165,7 +175,13 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
         accent = withContext(Dispatchers.IO) { track?.let { accentFromArtwork(ctx, it) } ?: Mint }
     }
     BackHandler(job != null || inPlayer) { if (job != null) trim = null else inPlayer = false }
-    CompositionLocalProvider(LocalAccent provides accent) { Surface(Modifier.fillMaxSize(), color = Ink) {
+    val scheme = darkColorScheme(
+        primary = accent, onPrimary = Ink, primaryContainer = accent.copy(alpha = .28f), onPrimaryContainer = Color.White,
+        secondary = accent, onSecondary = Ink, secondaryContainer = accent.copy(alpha = .22f), onSecondaryContainer = Color.White,
+        tertiary = accent, onTertiary = Ink, background = Ink, surface = Panel, onSurface = Color.White,
+        surfaceVariant = accent.copy(alpha = .12f), onSurfaceVariant = Color.LightGray
+    )
+    MaterialTheme(colorScheme = scheme) { CompositionLocalProvider(LocalAccent provides accent) { Surface(Modifier.fillMaxSize(), color = Ink) {
         when {
             job != null -> TrimScreen(job.src, onCancel = { trim = null }) { start, end, done ->
                 Exporter.trim(ctx, job.src, start, end, Store.appFile(ctx, job.track, job.lyrics)) { result ->
@@ -202,7 +218,7 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
                     }
                 })
         }
-    } }
+    }
     editDialogTrack?.let { item -> EditTrackDialog(item, onDismiss = { editDialogTrack = null }) { edit ->
         editDialogTrack = null
         pendingEdit = edit
@@ -218,12 +234,13 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
             else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
         }
     } }
-    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.3.0").apply() },
-        title = { Text("Canvas Player 0.3.0") },
+    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.4.0").apply() },
+        title = { Text("Canvas Player 0.4.0") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
             Text("What’s new", style = MaterialTheme.typography.titleMedium)
-            Text("• Edit song tags from the player\n• Multiple music folders and separate Artists / Albums views\n• Better video matching and manual video selection\n• Video sync controls and improved portrait-video cropping\n• Reliable mini-player navigation\n• Choose a download format before starting yt-dlp")
-        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.3.0").apply() }) { Text("Got it") } })
+            Text("• More reliable yt-dlp format selection, audio muxing, MP4 output, and visible error details\n• Align song and video waveforms by dragging, then fine-tune timing\n• Find sibling .lrc files by song title or audio filename with better folder fallback\n• Use album art as a blurred player background and apply its colors across controls\n• Search Google Images for a song or album with Deezer and 1900x1900 terms; check chosen image dimensions before embedding")
+        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.4.0").apply() }) { Text("Got it") } })
+    } }
 }
 
 @Composable private fun LibraryScreen(tracks: List<Track>, current: Track?, playing: Boolean, folder: String?, onChooseFolder: () -> Unit, onClearFolder: () -> Unit, onShuffle: () -> Unit, onPlay: (Track) -> Unit, onMiniOpen: () -> Unit, onMiniPlay: () -> Unit, onEdit: (TrackEdit) -> Unit) {
@@ -329,6 +346,36 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
     }
 }
 
+@Composable private fun BlurredAlbumBackground(track: Track, modifier: Modifier = Modifier) {
+    var embedded by remember(track.id) { mutableStateOf<ByteArray?>(null) }
+    val ctx = LocalContext.current
+    LaunchedEffect(track.id) { embedded = withContext(Dispatchers.IO) {
+        runCatching { MediaMetadataRetriever().run { setDataSource(ctx, track.uri); val bytes = embeddedPicture; release(); bytes } }.getOrNull()
+    } }
+    Box(modifier) {
+        AsyncImage(
+            model = embedded ?: track.artUri, contentDescription = null,
+            modifier = Modifier.fillMaxSize().scale(1.12f).blur(34.dp),
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+        )
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
+            Color.Black.copy(alpha = .40f), Ink.copy(alpha = .72f), Ink.copy(alpha = .94f)
+        ))))
+    }
+}
+
+private fun imageDimensions(context: android.content.Context, uri: Uri): Pair<Int, Int>? = runCatching {
+    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+    if (options.outWidth > 0 && options.outHeight > 0) options.outWidth to options.outHeight else null
+}.getOrNull()
+
+private fun openGoogleImageSearch(context: android.content.Context, query: String) {
+    val url = Uri.parse("https://www.google.com/search?tbm=isch&q=${Uri.encode(query)}")
+    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, url)) }
+        .onFailure { Toast.makeText(context, "Could not open Google Images: ${it.message}", Toast.LENGTH_LONG).show() }
+}
+
 @Composable private fun EditTrackDialog(track: Track, onDismiss: () -> Unit, onSave: (TrackEdit) -> Unit) {
     var title by remember(track.id) { mutableStateOf(track.title) }
     var trackNo by remember(track.id) { mutableStateOf("") }; var year by remember(track.id) { mutableStateOf("") }
@@ -336,13 +383,25 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
     var album by remember(track.id) { mutableStateOf(track.album) }; var albumArtist by remember(track.id) { mutableStateOf("") }
     var composer by remember(track.id) { mutableStateOf("") }; var comment by remember(track.id) { mutableStateOf("") }
     var cover by remember(track.id) { mutableStateOf<Uri?>(null) }
-    val coverPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { cover = it }
+    var coverDimensions by remember(track.id) { mutableStateOf<Pair<Int, Int>?>(null) }
+    val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
+    val coverPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { selected ->
+        cover = selected; coverDimensions = null
+        if (selected != null) scope.launch { coverDimensions = withContext(Dispatchers.IO) { imageDimensions(ctx, selected) } }
+    }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Edit tags") },
         text = { Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Text(track.path.substringAfterLast('/'), color = Color.LightGray, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (cover != null) AsyncImage(cover, null, Modifier.size(72.dp).clip(RoundedCornerShape(10.dp))) else AlbumArt(track, Modifier.size(72.dp).clip(RoundedCornerShape(10.dp)))
                 Spacer(Modifier.width(12.dp)); OutlinedButton(onClick = { coverPicker.launch("image/*") }) { Icon(Icons.Default.Image, null); Spacer(Modifier.width(6.dp)); Text("Album art") }
+            }
+            coverDimensions?.let { (width, height) -> Text("Selected image: ${width} × ${height} px", color = LocalAccent.current, style = MaterialTheme.typography.bodySmall) }
+            Text("Search Google Images, choose and save a cover, then select it above. Dimensions appear here before saving to the MP3.", color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { openGoogleImageSearch(ctx, "${track.title} ${track.artist} deezer 1900x1900 album cover") }) { Text("Google: song") }
+                TextButton(onClick = { openGoogleImageSearch(ctx, "${track.album} ${track.artist} deezer 1900x1900 album cover") }, enabled = track.album.isNotBlank()) { Text("Google: album") }
             }
             OutlinedTextField(title, { title = it }, label = { Text("Title") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -367,7 +426,10 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
     val syncPrefs = remember { ctx.getSharedPreferences("video_sync", 0) }
     var videoOffset by remember(track.id) { mutableLongStateOf(syncPrefs.getLong("offset_${track.id}", 0L)) }
     var syncDialog by remember { mutableStateOf(false) }
-    var downloadDialog by remember { mutableStateOf(false) }; var downloadUrl by remember { mutableStateOf("") }; var downloading by remember { mutableStateOf(false) }; var downloadProgress by remember { mutableFloatStateOf(0f) }; var updatingYtDlp by remember { mutableStateOf(false) }; var removeSponsorSegments by remember { mutableStateOf(false) }
+    var audioWaveform by remember(track.id) { mutableStateOf<WaveformData?>(null) }
+    var videoWaveform by remember(track.id) { mutableStateOf<WaveformData?>(null) }
+    var loadingWaveforms by remember { mutableStateOf(false) }
+    var downloadDialog by remember { mutableStateOf(false) }; var downloadUrl by remember { mutableStateOf("") }; var downloading by remember { mutableStateOf(false) }; var downloadProgress by remember { mutableFloatStateOf(0f) }; var updatingYtDlp by remember { mutableStateOf(false) }; var removeSponsorSegments by remember { mutableStateOf(false) }; var ytDlpError by remember { mutableStateOf<String?>(null) }
     var lookingUp by remember { mutableStateOf(false) }; var variants by remember { mutableStateOf<List<DownloadVariant>>(emptyList()) }; var selectedVariant by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val visuals by produceState<Pair<Uri?, Uri?>>(null to null, track.id, refresh) { value = withContext(Dispatchers.IO) { Store.find(ctx, track, false) to Store.find(ctx, track, true) } }
@@ -380,6 +442,18 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
         if (uri != null) { runCatching { ctx.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }; val root = DocumentFile.fromTreeUri(ctx, uri); val files = root?.let { MetadataMatcher.findVideosRecursively(it) }.orEmpty(); matches = MetadataMatcher.match(files, track); if (matches.isNullOrEmpty()) Toast.makeText(ctx, "No video matching ${track.title} found in that folder", Toast.LENGTH_LONG).show() }
     }
     val video = if (lyricsMode) visuals.second ?: visuals.first else visuals.first
+    LaunchedEffect(syncDialog, track.id, video) {
+        if (syncDialog && video != null) {
+            loadingWaveforms = true
+            val data = withContext(Dispatchers.IO) {
+                WaveformAnalyzer.read(ctx, track.uri) to WaveformAnalyzer.read(ctx, video)
+            }
+            audioWaveform = data.first; videoWaveform = data.second
+            loadingWaveforms = false
+        }
+    }
+    Box(Modifier.fillMaxSize()) {
+    BlurredAlbumBackground(track, Modifier.matchParentSize())
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }; Text("NOW PLAYING", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = LocalAccent.current); IconButton(onClick = onEditTrack) { Icon(Icons.Default.Edit, "Edit song tags") }; IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More options") } }
         Spacer(Modifier.weight(.4f))
@@ -436,10 +510,14 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
         }
         Spacer(Modifier.weight(.4f))
     }
+    }
     matches?.takeIf { it.isNotEmpty() }?.let { list -> AlertDialog(onDismissRequest = { matches = null }, title = { Text("Matching videos") }, text = { Column { list.forEach { file -> TextButton(onClick = { matches = null; onTrim(file.uri, pendingLyrics) }) { Text(file.name ?: "Choose video") } } } }, confirmButton = { TextButton(onClick = { matches = null }) { Text("Cancel") } }) }
     if (syncDialog) AlertDialog(onDismissRequest = { syncDialog = false }, title = { Text("Sync companion video") },
         text = { Column {
-            Text("Adjust the visual timing against this song. Positive values move the video later.", color = Color.LightGray)
+            Text("White is the song; color is the video. Drag the video waveform to line up a matching beat, then fine-tune below.", color = Color.LightGray)
+            if (loadingWaveforms) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (audioWaveform != null || videoWaveform != null) SyncWaveforms(audioWaveform, videoWaveform, track.durationMs, videoOffset) { videoOffset = it }
+            if (!loadingWaveforms && videoWaveform == null) Text("No audio waveform was found inside this video. You can still adjust the sync below.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
             Slider(value = videoOffset.toFloat(), onValueChange = { videoOffset = it.toLong() }, valueRange = -30_000f..30_000f)
             Text("${if (videoOffset >= 0) "+" else "−"}${formatTime(kotlin.math.abs(videoOffset))}", color = LocalAccent.current)
         } }, confirmButton = { TextButton(onClick = { syncPrefs.edit().putLong("offset_${track.id}", videoOffset).apply(); syncDialog = false }) { Text("Save") } },
@@ -451,7 +529,7 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
             OutlinedTextField(downloadUrl, { downloadUrl = it }, label = { Text("Video URL") }, placeholder = { Text("https://…") }, singleLine = true, enabled = !downloading)
             Text("Choose one of the formats below before downloading. Nothing downloads until you select a format and tap Download.", style = MaterialTheme.typography.bodySmall, color = Color.LightGray)
             TextButton(enabled = !updatingYtDlp && !downloading, onClick = {
-                updatingYtDlp = true
+                updatingYtDlp = true; ytDlpError = null
                 scope.launch {
                     val updated = withContext(Dispatchers.IO) { runCatching {
                         YoutubeDL.getInstance().init(ctx.applicationContext)
@@ -459,9 +537,11 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
                         YoutubeDL.getInstance().updateYoutubeDL(ctx.applicationContext, YoutubeDL.UpdateChannel.STABLE)
                     } }
                     updatingYtDlp = false
+                    if (updated.isFailure) ytDlpError = updated.exceptionOrNull()?.message?.take(500) ?: "Unknown yt-dlp update error"
                     Toast.makeText(ctx, if (updated.isSuccess) "yt-dlp is ready: ${updated.getOrNull()}" else "Could not update yt-dlp: ${updated.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                 }
             }) { Text(if (updatingYtDlp) "Updating yt-dlp…" else "Update yt-dlp") }
+            ytDlpError?.let { Text("yt-dlp: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = removeSponsorSegments, onCheckedChange = { removeSponsorSegments = it }, enabled = !downloading)
                 Text("Remove SponsorBlock sponsor, intro, and outro sections (YouTube only)", style = MaterialTheme.typography.bodySmall, color = Color.LightGray)
@@ -470,7 +550,7 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
             variants.forEach { variant ->
                 Row(Modifier.fillMaxWidth().clickable { selectedVariant = variant.id }, verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(selected = selectedVariant == variant.id, onClick = { selectedVariant = variant.id })
-                    Text(variant.label, color = Color.White, style = MaterialTheme.typography.bodySmall)
+                    Text(variant.label + if (variant.hasAudio) " · video + audio" else " · video only; audio will be muxed", color = Color.White, style = MaterialTheme.typography.bodySmall)
                 }
             }
             if (downloading) LinearProgressIndicator(progress = { (downloadProgress / 100f).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
@@ -483,18 +563,26 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
                         runCatching {
                             YoutubeDL.getInstance().init(ctx.applicationContext)
                             FFmpeg.getInstance().init(ctx.applicationContext)
-                            YoutubeDL.getInstance().getInfo(downloadUrl.trim()).formats.orEmpty()
+                            val info = runCatching { YoutubeDL.getInstance().getInfo(downloadUrl.trim()) }.recoverCatching {
+                                YoutubeDL.getInstance().updateYoutubeDL(ctx.applicationContext, YoutubeDL.UpdateChannel.STABLE)
+                                YoutubeDL.getInstance().getInfo(downloadUrl.trim())
+                            }.getOrThrow()
+                            info.formats.orEmpty()
                                 .filter { !it.formatId.isNullOrBlank() && it.ext == "mp4" && !it.vcodec.isNullOrBlank() && it.vcodec != "none" }
                                 .distinctBy { it.formatId }
                                 .sortedByDescending { it.height }
                                 .take(24)
-                                .map { format -> DownloadVariant(format.formatId!!, formatLabel(format)) }
+                                .map { format -> DownloadVariant(format.formatId!!, formatLabel(format), !format.acodec.isNullOrBlank() && format.acodec != "none") }
                         }
                     }
                     lookingUp = false
                     if (result.isSuccess && result.getOrNull().orEmpty().isNotEmpty()) {
                         variants = result.getOrDefault(emptyList()); selectedVariant = variants.first().id
-                    } else Toast.makeText(ctx, result.exceptionOrNull()?.message ?: "No MP4 video formats found", Toast.LENGTH_LONG).show()
+                        ytDlpError = null
+                    } else {
+                        ytDlpError = result.exceptionOrNull()?.message?.take(500) ?: "No MP4 video formats found for this URL"
+                        Toast.makeText(ctx, ytDlpError, Toast.LENGTH_LONG).show()
+                    }
                 }
             }) { Text(if (lookingUp) "Checking…" else "Show formats") }
             TextButton(enabled = !downloading && !lookingUp && selectedVariant != null, onClick = {
@@ -507,20 +595,33 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
                     runCatching {
                         YoutubeDL.getInstance().init(ctx.applicationContext)
                         FFmpeg.getInstance().init(ctx.applicationContext)
+                        val chosen = variants.firstOrNull { it.id == selectedVariant } ?: error("Select a video format first")
                         val request = YoutubeDLRequest(downloadUrl.trim()).apply {
                             addOption("--no-playlist")
-                            addOption("-f", selectedVariant!!)
+                            addOption("--force-overwrites")
+                            addOption("-f", if (chosen.hasAudio) chosen.id else "${chosen.id}+bestaudio[ext=m4a]/${chosen.id}+bestaudio")
+                            addOption("--merge-output-format", "mp4")
+                            addOption("--remux-video", "mp4")
                             if (removeSponsorSegments) addOption("--sponsorblock-remove", "sponsor,intro,outro")
                             addOption("-o", tempFile.absolutePath)
                         }
-                        YoutubeDL.getInstance().execute(request, "canvas-${track.id}") { progress, _, _ ->
-                            ctx.mainExecutor.execute { downloadProgress = progress }
+                        val runDownload = {
+                            tempFile.delete()
+                            YoutubeDL.getInstance().execute(request, "canvas-${track.id}-${System.currentTimeMillis()}") { progress, _, _ ->
+                                ctx.mainExecutor.execute { downloadProgress = progress }
+                            }
                         }
+                        runCatching { runDownload() }.recoverCatching {
+                            YoutubeDL.getInstance().updateYoutubeDL(ctx.applicationContext, YoutubeDL.UpdateChannel.STABLE)
+                            runDownload()
+                        }.getOrThrow()
+                        check(tempFile.isFile && tempFile.length() > 0L) { "yt-dlp finished without creating the expected MP4. Try another MP4 format." }
                     }
                 }
                 if (result.isFailure) {
                     downloading = false
-                    Toast.makeText(ctx, "Download failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                    ytDlpError = result.exceptionOrNull()?.message?.take(500) ?: "Unknown download error"
+                    Toast.makeText(ctx, "Download failed: $ytDlpError", Toast.LENGTH_LONG).show()
                 } else {
                     val rangeAndDuration = withContext(Dispatchers.IO) {
                         SilenceAnalyzer.audibleRange(tempFile) to runCatching {
@@ -549,6 +650,48 @@ private data class TrackEdit(val track: Track, val title: String, val trackNumbe
         } },
         dismissButton = { TextButton(enabled = !downloading, onClick = { downloadDialog = false }) { Text("Cancel") } }
     )
+}
+
+@Composable private fun SyncWaveforms(audio: WaveformData?, video: WaveformData?, trackDurationMs: Long, offsetMs: Long, onOffsetChange: (Long) -> Unit) {
+    val accent = LocalAccent.current
+    val latestOffset = rememberUpdatedState(offsetMs)
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("SONG", color = Color.White, style = MaterialTheme.typography.labelSmall)
+            Text("VIDEO  •  DRAG TO ALIGN", color = accent, style = MaterialTheme.typography.labelSmall)
+        }
+        Canvas(
+            Modifier.fillMaxWidth().height(112.dp).clip(RoundedCornerShape(12.dp)).background(Color.Black.copy(alpha = .36f))
+                .pointerInput(audio?.durationMs, video?.durationMs) {
+                    detectDragGestures { change, drag ->
+                        change.consume()
+                        onOffsetChange((latestOffset.value + drag.x * 50f).roundToLong().coerceIn(-30_000L, 30_000L))
+                    }
+                }
+        ) {
+            val count = max(audio?.bars?.size ?: 0, video?.bars?.size ?: 0).coerceAtLeast(2)
+            val duration = audio?.durationMs?.takeIf { it > 0 } ?: trackDurationMs.coerceAtLeast(1L)
+            val audioCenter = size.height * .27f
+            val videoCenter = size.height * .73f
+            val maxAmp = size.height * .22f
+            val step = size.width / count
+            for (i in 0 until count) {
+                val x = (i + .5f) * step
+                val time = (i.toLong() * duration) / count
+                audio?.bars?.getOrNull(i * (audio.bars.size) / count)?.let { amplitude ->
+                    drawLine(Color.White.copy(alpha = .88f), Offset(x, audioCenter - amplitude * maxAmp), Offset(x, audioCenter + amplitude * maxAmp), step * .62f, StrokeCap.Round)
+                }
+                video?.let { wave ->
+                    val videoTime = Math.floorMod(time - latestOffset.value, wave.durationMs.coerceAtLeast(1L))
+                    val index = ((videoTime * wave.bars.size) / wave.durationMs.coerceAtLeast(1L)).toInt().coerceIn(0, wave.bars.lastIndex.coerceAtLeast(0))
+                    wave.bars.getOrNull(index)?.let { amplitude ->
+                        drawLine(accent.copy(alpha = .95f), Offset(x, videoCenter - amplitude * maxAmp), Offset(x, videoCenter + amplitude * maxAmp), step * .62f, StrokeCap.Round)
+                    }
+                }
+            }
+            drawLine(Color.White.copy(alpha = .2f), Offset(0f, size.height / 2f), Offset(size.width, size.height / 2f), 1.dp.toPx())
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
