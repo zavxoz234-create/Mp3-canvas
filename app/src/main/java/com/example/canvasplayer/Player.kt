@@ -51,9 +51,9 @@ class PlaybackService : MediaSessionService() {
 
 /** Art box: video if available, otherwise static album art. */
 @Composable
-fun ArtBox(videoUri: Uri?, staticArt: Uri, audio: Player, modifier: Modifier = Modifier) {
+fun ArtBox(videoUri: Uri?, staticArt: Uri, audio: Player, offsetMs: Long = 0L, modifier: Modifier = Modifier) {
     Box(modifier) {
-        if (videoUri != null) LoopingVideo(videoUri, audio)
+        if (videoUri != null) LoopingVideo(videoUri, audio, offsetMs)
         else AsyncImage(
             model = staticArt, contentDescription = null,
             modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop
@@ -62,7 +62,7 @@ fun ArtBox(videoUri: Uri?, staticArt: Uri, audio: Player, modifier: Modifier = M
 }
 
 @Composable
-fun LoopingVideo(uri: Uri, audio: Player) {
+fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long = 0L) {
     val ctx = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val vp = remember {
@@ -73,14 +73,14 @@ fun LoopingVideo(uri: Uri, audio: Player) {
         }
     }
 
-    LaunchedEffect(uri) {
+    LaunchedEffect(uri, offsetMs) {
         vp.setMediaItem(MediaItem.fromUri(uri))
         vp.prepare()
         vp.playWhenReady = audio.isPlaying
         while (true) { // keep the video aligned with the audio position
             val dur = vp.duration
             if (dur > 0 && dur != C.TIME_UNSET) {
-                val target = audio.currentPosition % dur
+                val target = Math.floorMod(audio.currentPosition - offsetMs, dur)
                 if (abs(vp.currentPosition - target) > 400) vp.seekTo(target)
             }
             delay(1500)

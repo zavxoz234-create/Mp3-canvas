@@ -22,6 +22,7 @@ import java.io.File
 import java.nio.ByteOrder
 import kotlin.math.sqrt
 import java.io.BufferedReader
+import java.text.Normalizer
 
 data class Track(
     val id: Long, val title: String, val artist: String,
@@ -56,26 +57,31 @@ fun loadLrc(context: Context, track: Track, treeUri: String?, rootFolder: String
             directory = directory.findFile(segment)?.takeIf { it.isDirectory } ?: return emptyList()
         }
         val audioName = track.path.substringAfterLast('/').substringBeforeLast('.')
-        val expected = listOf("${track.title}.lrc", "$audioName.lrc")
-        val lyricFile = expected.firstNotNullOfOrNull { name -> directory.findFile(name) }
-            ?: directory.listFiles().firstOrNull { file -> file.isFile && file.name?.endsWith(".lrc", true) == true && file.name?.substringBeforeLast('.')?.equals(track.title, true) == true }
+        fun normalized(value: String) = Normalizer.normalize(value, Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "").lowercase().replace(Regex("[^a-z0-9]"), "")
+        val expectedNames = setOf(normalized(track.title), normalized(audioName))
+        val lyricFile = directory.listFiles().firstOrNull { file ->
+            file.isFile && file.name?.endsWith(".lrc", true) == true &&
+                normalized(file.name!!.substringBeforeLast('.')) in expectedNames
+        }
             ?: return emptyList()
         val content = context.contentResolver.openInputStream(lyricFile.uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
             ?: return emptyList()
-        val pattern = Regex("\\[(\\d{1,2}):(\\d{2})(?:[.:](\\d{1,3}))?](.*)")
+        val offset = Regex("(?im)^\\[offset:([+-]?\\d+)]").find(content)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        val pattern = Regex("\\[(\\d{1,3}):(\\d{2})(?:[.:](\\d{1,3}))?](.*)")
         content.lineSequence().flatMap { line ->
             val matches = pattern.findAll(line).toList()
             val text = matches.lastOrNull()?.groupValues?.get(4)?.trim().orEmpty()
             matches.map { match ->
                 val fraction = match.groupValues[3]
                 val fractionMs = when (fraction.length) { 1 -> fraction.toLong() * 100; 2 -> fraction.toLong() * 10; 3 -> fraction.toLong(); else -> 0L }
-                TimedLyric((match.groupValues[1].toLong() * 60 + match.groupValues[2].toLong()) * 1000 + fractionMs, text)
+                TimedLyric(((match.groupValues[1].toLong() * 60 + match.groupValues[2].toLong()) * 1000 + fractionMs + offset).coerceAtLeast(0L), text)
             }
         }.filter { it.text.isNotBlank() }.sortedBy { it.timeMs }.toList()
     }.getOrDefault(emptyList())
 }
 
-fun loadTracks(c: Context, rootFolder: String): List<Track> {
+fun loadTracks(c: Context, rootFolder: String? = null): List<Track> {
     val out = mutableListOf<Track>()
     val col = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
     val proj = arrayOf(
@@ -84,7 +90,9 @@ fun loadTracks(c: Context, rootFolder: String): List<Track> {
         MediaStore.Audio.Media.DURATION
     )
     c.contentResolver.query(
-        col, proj, "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DATA} LIKE ?", arrayOf(rootFolder.trimEnd('/') + "/%"),
+        col, proj,
+        if (rootFolder.isNullOrBlank()) "${MediaStore.Audio.Media.IS_MUSIC} != 0" else "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DATA} LIKE ?",
+        if (rootFolder.isNullOrBlank()) null else arrayOf(rootFolder.trimEnd('/') + "/%"),
         "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE"
     )?.use { cur ->
         while (cur.moveToNext()) out += Track(
@@ -200,6 +208,20 @@ object MetadataMatcher {
             .filter { it.isFile && (it.type?.startsWith("video/") == true) }
             .filter { norm(it.name ?: "").contains(title) }
             .sortedByDescending { if (norm(it.name ?: "").contains(artist)) 1 else 0 }
+    }
+
+    fun findVideosRecursively(root: DocumentFile, maxDepth: Int = 8): List<DocumentFile> {
+        val found = mutableListOf<DocumentFile>()
+        fun visit(dir: DocumentFile, depth: Int) {
+            if (depth > maxDepth) return
+            for (child in runCatching { dir.listFiles().toList() }.getOrDefault(emptyList())) {
+                if (child.isDirectory) visit(child, depth + 1)
+                else if (child.isFile && (child.type?.startsWith("video/") == true ||
+                        child.name?.substringAfterLast('.', "")?.lowercase() in setOf("mp4", "m4v", "mov", "webm", "mkv"))) found += child
+            }
+        }
+        visit(root, 0)
+        return found
     }
 }
 
