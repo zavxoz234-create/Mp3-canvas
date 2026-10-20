@@ -552,17 +552,25 @@ object MediaStoreTrackCache {
     private fun version(context: Context): String = if (Build.VERSION.SDK_INT >= 29)
         MediaStore.getVersion(context, MediaStore.VOLUME_EXTERNAL) else MediaStore.getVersion(context)
 
-    fun load(context: Context): List<Track>? = runCatching {
+    private fun readTracks(context: Context): Pair<String, List<Track>>? = runCatching {
         val payload = JSONObject(cacheFile(context).readText(Charsets.UTF_8))
-        if (payload.optString("version") != version(context)) return null
-        val entries = payload.optJSONArray("tracks") ?: return null
-        List(entries.length()) { index ->
+        val entries = payload.optJSONArray("tracks") ?: error("Missing cached tracks")
+        payload.optString("version") to List(entries.length()) { index ->
             val item = entries.getJSONObject(index)
             Track(item.getLong("id"), item.optString("title", "Unknown"), item.optString("artist", "Unknown"),
                 item.optString("album"), item.optLong("albumId"), item.optString("path"), item.optLong("durationMs"),
                 item.optString("albumArtist"))
         }
     }.getOrNull()
+
+    /** Last known-good rows remain usable while Android is rebuilding its media index. */
+    fun loadLastKnown(context: Context): List<Track>? = readTracks(context)?.second?.takeIf { it.isNotEmpty() }
+
+    fun load(context: Context): List<Track>? {
+        val (cachedVersion, tracks) = readTracks(context) ?: return null
+        if (cachedVersion != version(context) || tracks.isEmpty()) return null
+        return tracks
+    }
 
     fun save(context: Context, tracks: List<Track>) {
         runCatching {
