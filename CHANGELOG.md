@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.0 — 2026-10-20
+
+### New
+- Automatic official-video lookup. When a song has no companion video, the player searches YouTube (via the bundled yt-dlp) and downloads the official upload: the artist's own channel, a VEVO channel, or a verified channel that names the artist and calls the upload official. Lyric videos, live versions, covers, remixes, audio-only uploads and auto-generated "Topic" uploads are skipped. Only H.264 up to 720p is fetched.
+- Player menu: **Find official video now**, **Auto-find official videos** (on/off) and **Auto-download on Wi-Fi only** (on/off). Searches that find nothing are not repeated for a week; removing a video stops it from being fetched again.
+- When a canvas video is available the album art is replaced by it as soon as the first frame is rendered. The cover is removed from the screen instead of being kept underneath.
+- Long titles, artists and albums scroll (Now Playing, mini-player, and the playing row in the library).
+
+### Performance and animation fixes
+- Playback position updates no longer recompose the whole Now Playing screen; only the slider, the time labels and the lyrics read it. The slider no longer fights with the position poll while dragging.
+- Video renders on a TextureView so rounded clipping, fading and swipe movement apply to it (a SurfaceView ignores all three). Changing the sync offset no longer re-prepares the decoder, drift correction is gentler, the video's audio track is not decoded, and the lyrics view no longer rebuilds the video player each time it is opened.
+- Swiping the artwork now follows the finger and springs back. Lyrics scroll smoothly to the active line, and the active line scales in the graphics layer instead of changing text size.
+- Album art is decoded once at the displayed size, kept in an LRU cache, and at most two decodes run at once (previously every list row opened its own MediaMetadataRetriever and decoded the full-size picture). Accent colour reuses the same decode.
+- The previous song's video is no longer shown for a moment after changing track.
+
+### Notes
+- Spotify Canvas is not supported: Spotify has no public API for it.
+- Official music videos often start with an intro that the studio track does not have; use **Sync video to song** if the picture is offset.
+- yt-dlp can be blocked by YouTube sign-in or age checks; those songs simply keep their album art.
+
 ## 0.7.5 — 2026-10-20
 
 ### Fixed and improved
