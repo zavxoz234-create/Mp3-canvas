@@ -130,7 +130,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     var folderUris by remember { mutableStateOf(prefs.getStringSet("folder_uris_v2", null)?.mapNotNull { entry -> entry.split("\t", limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] } }?.toMap().orEmpty()) }
     var folderLabel by remember { mutableStateOf(prefs.getString("folderLabel", null)) }
     var folderTree by remember { mutableStateOf(prefs.getString("folderUri", null)) }
-    var visibleTracks by remember { mutableStateOf(tracks) }
+    var visibleTracks by remember { mutableStateOf(tracks) }; var scannedFolderTracks by remember { mutableStateOf<List<Track>?>(null) }; var refreshingFolderScan by remember { mutableStateOf(false) }
     var inPlayer by remember { mutableStateOf(false) }
     var currentId by remember { mutableStateOf<String?>(null) }
     var playing by remember { mutableStateOf(false) }
@@ -163,7 +163,18 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             } else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
         }
     }
-    LaunchedEffect(tracks, folderRoots, folderUris) {
+    LaunchedEffect(folderRoots, folderUris, folder, folderTree) {
+        val selectedFolders = folderRoots.mapNotNull { root ->
+            val treeUri = folderUris[root] ?: if (root == folder) folderTree else null
+            treeUri?.let { root to it }
+        }
+        scannedFolderTracks = if (folderRoots.isEmpty()) emptyList() else withContext(Dispatchers.IO) {
+            SelectedFolderScanCache.load(ctx, selectedFolders) ?: loadTracksFromSelectedFolders(ctx, selectedFolders).also {
+                SelectedFolderScanCache.save(ctx, selectedFolders, it)
+            }
+        }
+    }
+    LaunchedEffect(tracks, folderRoots, folderUris, scannedFolderTracks) {
         visibleTracks = if (folderRoots.isEmpty()) emptyList() else withContext(Dispatchers.IO) {
             val roots = folderRoots.map { it.replace("\\", "/").trimEnd('/') }
             val byPath = tracks.filter { track -> roots.any { root ->
@@ -174,7 +185,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
                 val treeUri = folderUris[root] ?: if (root == folder) folderTree else null
                 treeUri?.let { root to it }
             }
-            val folderTracks = loadTracksFromSelectedFolders(ctx, selectedFolders)
+            val folderTracks = scannedFolderTracks.orEmpty()
             val indexedPaths = byPath.map { it.path.replace("\\", "/").trimEnd('/').lowercase(Locale.ROOT) }.toSet()
             (byPath + folderTracks.filterNot { it.path.replace("\\", "/").trimEnd('/').lowercase(Locale.ROOT) in indexedPaths })
                 .distinctBy { it.path.replace("\\", "/").trimEnd('/').lowercase(Locale.ROOT) }
@@ -211,6 +222,24 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             }
         }
     }
+    val refreshSelectedScan = {
+        if (!refreshingFolderScan && folderRoots.isNotEmpty()) scope.launch {
+            val selectedFolders = folderRoots.mapNotNull { root ->
+                val treeUri = folderUris[root] ?: if (root == folder) folderTree else null
+                treeUri?.let { root to it }
+            }
+            refreshingFolderScan = true
+            try {
+                val scan = withContext(Dispatchers.IO) {
+                    loadTracksFromSelectedFolders(ctx, selectedFolders).also { SelectedFolderScanCache.save(ctx, selectedFolders, it) }
+                }
+                scannedFolderTracks = scan
+                Toast.makeText(ctx, "Folder scan refreshed: " + scan.size + " songs", Toast.LENGTH_LONG).show()
+            } catch (error: Exception) {
+                Toast.makeText(ctx, "Could not refresh folder scan: " + error.message, Toast.LENGTH_LONG).show()
+            } finally { refreshingFolderScan = false }
+        }
+    }
     val job = trim
     val track = visibleTracks.firstOrNull { it.id.toString() == currentId } ?: tracks.firstOrNull { it.id.toString() == currentId }
     var accent by remember { mutableStateOf(Mint) }
@@ -241,7 +270,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
                 onTrim = { uri, lyrics -> trim = TrimJob(uri, lyrics, track) }, onChanged = { refresh++ },
                 onEditTrack = { editDialogTrack = track })
             else -> LibraryScreen(visibleTracks, track, playing, folderLabel ?: folderRoots.joinToString(" + ") { File(it).name.ifBlank { it } },
-                onChooseFolder = { picker.launch(null) }, onClearFolder = { folder = null; folderRoots = emptyList(); folderLabel = null; folderTree = null; folderUris = emptyMap(); prefs.edit().remove("folder").remove("folderLabel").remove("folderUri").remove("folders_v2").remove("folder_uris_v2").apply(); onFolderChange(null) },
+                onChooseFolder = { picker.launch(null) }, onRefreshScan = refreshSelectedScan, refreshingFolderScan = refreshingFolderScan, onClearFolder = { folder = null; folderRoots = emptyList(); folderLabel = null; folderTree = null; folderUris = emptyMap(); prefs.edit().remove("folder").remove("folderLabel").remove("folderUri").remove("folders_v2").remove("folder_uris_v2").apply(); onFolderChange(null) },
                 onShuffle = { if (player != null && visibleTracks.isNotEmpty()) { player.setMediaItems(visibleTracks.map { it.toMediaItem() }); player.shuffleModeEnabled = true; player.prepare(); player.play(); shuffle = true; inPlayer = true } },
                 onPlay = { selected -> if (player != null) { player.setMediaItems(visibleTracks.map { it.toMediaItem() }, visibleTracks.indexOf(selected), 0); player.shuffleModeEnabled = shuffle; player.prepare(); player.play(); inPlayer = true } },
                 onMiniOpen = { val wasPlaying = player?.isPlaying == true; inPlayer = true; if (wasPlaying) player?.play() },
@@ -288,7 +317,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     } }
 }
 
-@Composable private fun LibraryScreen(tracks: List<Track>, current: Track?, playing: Boolean, folder: String?, onChooseFolder: () -> Unit, onClearFolder: () -> Unit, onShuffle: () -> Unit, onPlay: (Track) -> Unit, onMiniOpen: () -> Unit, onMiniPlay: () -> Unit, onEdit: (TrackEdit) -> Unit) {
+@Composable private fun LibraryScreen(tracks: List<Track>, current: Track?, playing: Boolean, folder: String?, onChooseFolder: () -> Unit, onRefreshScan: () -> Unit, refreshingFolderScan: Boolean, onClearFolder: () -> Unit, onShuffle: () -> Unit, onPlay: (Track) -> Unit, onMiniOpen: () -> Unit, onMiniPlay: () -> Unit, onEdit: (TrackEdit) -> Unit) {
     var search by remember { mutableStateOf("") }
     var edit by remember { mutableStateOf<Track?>(null) }
     var section by remember { mutableStateOf("Songs") }
@@ -305,7 +334,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             Box {
                 IconButton(onClick = { listMenu = true }) { Icon(Icons.Default.MoreVert, "Library options", tint = LocalAccent.current) }
                 DropdownMenu(listMenu, { listMenu = false }) {
-                    DropdownMenuItem(text = { Text("Add music folder") }, onClick = { listMenu = false; onChooseFolder() })
+                    DropdownMenuItem(text = { Text("Add music folder") }, onClick = { listMenu = false; onChooseFolder() }); if (folder != null) DropdownMenuItem(enabled = !refreshingFolderScan, text = { Text(if (refreshingFolderScan) "Refreshing scan…" else "Refresh selected folders") }, onClick = { listMenu = false; onRefreshScan() })
                     if (folder != null) DropdownMenuItem(text = { Text("Clear scanned folders") }, onClick = { listMenu = false; onClearFolder() })
                 }
             }
