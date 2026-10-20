@@ -830,6 +830,15 @@ private suspend fun searchDeezerCovers(
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
+@Composable
+private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyric>, pos: MutableLongState, player: Player) {
+    AnimatedVisibility(visible, Modifier.fillMaxSize(), enter = fadeIn(tween(200)), exit = fadeOut(tween(160))) {
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .62f))) {
+            key(track.id) { LyricsPane(track, lyrics, pos, player, Modifier.fillMaxSize()) }
+        }
+    }
+}
+
 @Composable private fun PlayerScreen(track: Track, queueTracks: List<Track>, player: Player, playing: Boolean, shuffle: Boolean, refresh: Int, ytDlpReady: Boolean?, ytDlpInitError: String?, folderTree: String?, rootFolder: String?, onBack: () -> Unit, onShuffle: () -> Unit, onYtDlpInit: (Boolean, String?) -> Unit, onTrim: (Uri, Boolean) -> Unit, onChanged: () -> Unit, onEditTrack: () -> Unit) {
     val ctx = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -960,11 +969,7 @@ private suspend fun searchDeezerCovers(
             // Canvas video if there is one (album art disappears once it is playing), otherwise the album art.
             ArtBox(video, player, videoOffset, Modifier.fillMaxSize()) { AlbumArt(track, Modifier.fillMaxSize(), decodePx = 1024) }
             // Lyrics float over the art/canvas, so the video player keeps running instead of being rebuilt.
-            AnimatedVisibility(lyricsMode, Modifier.fillMaxSize(), enter = fadeIn(tween(200)), exit = fadeOut(tween(160))) {
-                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .62f))) {
-                    key(track.id) { LyricsPane(track, lyrics, pos, player, Modifier.fillMaxSize()) }
-                }
-            }
+            LyricsOverlay(lyricsMode, track, lyrics, pos, player)
         }
         Spacer(Modifier.height(26.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
