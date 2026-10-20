@@ -534,7 +534,26 @@ private fun imageDimensions(context: android.content.Context, uri: Uri): Pair<In
     LaunchedEffect(track.id) { embedded = withContext(Dispatchers.IO) {
         runCatching { MediaMetadataRetriever().run { setDataSource(ctx, track.uri); val bytes = embeddedPicture; release(); bytes } }.getOrNull()
     } }
-    fun search() { val terms = "${query.trim().removeSuffix(" deezer")} deezer"; ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?tbm=isch&q=${Uri.encode(terms)}"))) }
+    fun search() {
+        if (query.isBlank()) return
+        searching = true; error = null
+        scope.launch {
+            val res = withContext(Dispatchers.IO) {
+                fetchInAppCovers(
+                    query = query,
+                    byAlbum = albumMode,
+                    highResolution = highResolution,
+                    expectedAlbum = track.album,
+                    expectedAlbumArtist = track.albumArtist,
+                    expectedSong = track.title,
+                    expectedSongArtist = track.artist
+                )
+            }
+            searching = false
+            results = res
+            if (res.isEmpty()) error = "No covers found in-app. Try a different query."
+        }
+    }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Find album art") },
         text = { Column(Modifier.heightIn(max = 580.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -579,6 +598,85 @@ private fun imageDimensions(context: android.content.Context, uri: Uri): Pair<In
 
 private fun normalizeCoverMatch(value: String): String = value.lowercase(Locale.ROOT)
     .replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim().replace(Regex("\\s+"), " ")
+
+private suspend fun fetchInAppCovers(
+    query: String,
+    byAlbum: Boolean,
+    highResolution: Boolean,
+    expectedAlbum: String,
+    expectedAlbumArtist: String,
+    expectedSong: String,
+    expectedSongArtist: String
+): List<CoverResult> = coroutineScope {
+    val results = mutableListOf<CoverResult>()
+    val cleanQuery = query.trim()
+    if (cleanQuery.isBlank()) return@coroutineScope emptyList()
+
+    // 1. iTunes Search API
+    runCatching {
+        val entity = if (byAlbum) "album" else "song"
+        val url = URL("https://itunes.apple.com/search?term=${Uri.encode(cleanQuery)}&media=music&entity=$entity&limit=10")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            connectTimeout = 4000; readTimeout = 4000
+            setRequestProperty("User-Agent", "Mozilla/5.0")
+        }
+        val body = conn.inputStream.bufferedReader().use { it.readText() }
+        conn.disconnect()
+        val data = JSONObject(body).optJSONArray("results") ?: JSONArray()
+        for (i in 0 until data.length()) {
+            val item = data.getJSONObject(i)
+            val artworkUrl = item.optString("artworkUrl100").replace("100x100bb", "600x600bb")
+            if (artworkUrl.isNotBlank()) {
+                val title = if (byAlbum) item.optString("collectionName") else item.optString("trackName")
+                val artist = item.optString("artistName")
+                val imgConn = (URL(artworkUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 4000; readTimeout = 4000
+                }
+                val bytes = imgConn.inputStream.use { it.readBytes() }
+                imgConn.disconnect()
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                if (bounds.outWidth > 0) {
+                    results.add(CoverResult(title, artist, bytes, bounds.outWidth, bounds.outHeight))
+                }
+            }
+        }
+    }
+
+    // 2. Deezer API
+    if (results.size < 4) {
+        runCatching {
+            val endpoint = if (byAlbum) "album" else "track"
+            val url = URL("https://api.deezer.com/search/$endpoint?q=${Uri.encode(cleanQuery)}&limit=10")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 4000; readTimeout = 4000
+            }
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            conn.disconnect()
+            val data = JSONObject(body).optJSONArray("data") ?: JSONArray()
+            for (i in 0 until data.length()) {
+                val item = data.getJSONObject(i)
+                val albumObj = if (byAlbum) item else item.optJSONObject("album") ?: continue
+                val imgUrl = albumObj.optString("cover_xl").ifBlank { albumObj.optString("cover_big") }
+                if (imgUrl.isNotBlank()) {
+                    val title = if (byAlbum) item.optString("title") else item.optString("title")
+                    val artist = item.optJSONObject("artist")?.optString("name").orEmpty()
+                    val imgConn = (URL(imgUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 4000; readTimeout = 4000
+                    }
+                    val bytes = imgConn.inputStream.use { it.readBytes() }
+                    imgConn.disconnect()
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                    if (bounds.outWidth > 0) {
+                        results.add(CoverResult(title, artist, bytes, bounds.outWidth, bounds.outHeight))
+                    }
+                }
+            }
+        }
+    }
+    return@coroutineScope results.distinctBy { "${it.title}-${it.subtitle}" }
+}
 
 private suspend fun searchDeezerCovers(
     query: String,
