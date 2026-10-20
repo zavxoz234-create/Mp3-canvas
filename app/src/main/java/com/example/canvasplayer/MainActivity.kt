@@ -279,7 +279,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             else -> LibraryScreen(visibleTracks, track, playing, folderLabel ?: folderRoots.joinToString(" + ") { File(it).name.ifBlank { it } },
                 onChooseFolder = { picker.launch(null) }, onRefreshScan = refreshSelectedScan, refreshingFolderScan = refreshingFolderScan, onClearFolder = { folder = null; folderRoots = emptyList(); folderLabel = null; folderTree = null; folderUris = emptyMap(); prefs.edit().remove("folder").remove("folderLabel").remove("folderUri").remove("folders_v2").remove("folder_uris_v2").apply(); onFolderChange(null) },
                 onShuffle = { if (player != null && visibleTracks.isNotEmpty()) { player.setMediaItems(visibleTracks.map { it.toMediaItem() }); player.shuffleModeEnabled = true; player.prepare(); player.play(); shuffle = true; inPlayer = true } },
-                onPlay = { selected -> if (player != null) { player.setMediaItems(visibleTracks.map { it.toMediaItem() }, visibleTracks.indexOf(selected), 0); player.shuffleModeEnabled = shuffle; player.prepare(); player.play(); inPlayer = true } },
+                onPlay = { selected -> if (player != null) { val keepShuffle = shuffle || player.shuffleModeEnabled; player.setMediaItems(visibleTracks.map { it.toMediaItem() }, visibleTracks.indexOf(selected), 0); player.shuffleModeEnabled = keepShuffle; player.prepare(); player.play(); shuffle = keepShuffle; inPlayer = true } },
                 onMiniOpen = { val wasPlaying = player?.isPlaying == true; inPlayer = true; if (wasPlaying) player?.play() },
                 onMiniPlay = { if (player != null) { if (playing) player.pause() else player.play() } },
                 onEdit = { edit ->
@@ -330,11 +330,13 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     var section by remember { mutableStateOf("Songs") }
     var selectedGroup by remember { mutableStateOf<String?>(null) }
     var listMenu by remember { mutableStateOf(false) }
-    val shown = tracks.filter { it.title.contains(search, true) || it.artist.contains(search, true) || it.album.contains(search, true) || it.albumArtist.contains(search, true) }
-    val artistPairs = tracks.flatMap { track -> splitArtists(track.artist).ifEmpty { listOf("Unknown artist") }.map { it to track } }
-    val artists = artistPairs.groupBy({ it.first.trim().lowercase(Locale.ROOT) }, { it })
-        .mapValues { (_, entries) -> entries.first().first to entries.map { it.second }.distinctBy { it.id } }.toSortedMap()
-    val albums = tracks.groupBy { it.albumGroupingKey() }.toSortedMap()
+    val shown = remember(tracks, search) { tracks.filter { it.title.contains(search, true) || it.artist.contains(search, true) || it.album.contains(search, true) || it.albumArtist.contains(search, true) } }
+    val artists = remember(tracks) {
+        tracks.flatMap { track -> splitArtists(track.artist).ifEmpty { listOf("Unknown artist") }.map { it to track } }
+            .groupBy({ it.first.trim().lowercase(Locale.ROOT) }, { it })
+            .mapValues { (_, entries) -> entries.first().first to entries.map { it.second }.distinctBy { it.id } }.toSortedMap()
+    }
+    val albums = remember(tracks) { tracks.groupBy { it.albumGroupingKey() }.toSortedMap() }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column { Text("CANVAS", style = MaterialTheme.typography.labelLarge, color = LocalAccent.current); Text("Your music", style = MaterialTheme.typography.headlineMedium) }
@@ -543,7 +545,7 @@ private suspend fun searchDeezerCovers(
 ): List<CoverResult> = coroutineScope {
     if (query.isBlank()) return@coroutineScope emptyList()
     val endpoint = if (byAlbum) "album" else "track"
-    val api = URL("https://api.deezer.com/search/$endpoint?q=4{Uri.encode(query)}&limit=25")
+    val api = URL("https://api.deezer.com/search/$endpoint?q=${Uri.encode(query)}&limit=25")
     val connection = api.openConnection().apply {
         connectTimeout = 5_000
         readTimeout = 7_000
@@ -1106,3 +1108,6 @@ private fun splitArtists(value: String): List<String> {
         }
     }.distinctBy { it.lowercase() }
 }
+
+
+The focused UI element is 1 AXWebArea raw.githubusercontent.com/zavxoz234-create/Mp3-canvas/main/app/src/main/java/com/example/canvasplayer/MainActivity.kt
