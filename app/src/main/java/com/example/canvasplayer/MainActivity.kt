@@ -72,6 +72,7 @@ import org.jaudiotagger.audio.AudioFileIO
 import org.jaudiotagger.tag.FieldKey
 import org.jaudiotagger.tag.images.ArtworkFactory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -100,16 +101,26 @@ class MainActivity : ComponentActivity() {
         reloadTracks()
     }
     private val reloadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var reloadJob: Job? = null
     private fun reloadTracks(root: String? = null) {
-        reloadScope.launch { tracks = withContext(Dispatchers.IO) { loadTracks(this@MainActivity) } }
+        if (reloadJob?.isActive == true) return
+        reloadJob = reloadScope.launch {
+            val cached = withContext(Dispatchers.IO) { MediaStoreTrackCache.load(this@MainActivity) }
+            if (cached != null) { tracks = cached; return@launch }
+            val loaded = withContext(Dispatchers.IO) { loadTracks(this@MainActivity) }
+            tracks = loaded
+            withContext(Dispatchers.IO) { MediaStoreTrackCache.save(this@MainActivity, loaded) }
+        }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val token = SessionToken(this, ComponentName(this, PlaybackService::class.java))
         val future = MediaController.Builder(this, token).buildAsync()
         future.addListener({ controller = future.get() }, ContextCompat.getMainExecutor(this))
-        perms.launch(if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.POST_NOTIFICATIONS) else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE))
-        reloadTracks()
+        val requestedPermissions = if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.POST_NOTIFICATIONS) else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        perms.launch(requestedPermissions)
+        val audioPermission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
+        if (ContextCompat.checkSelfPermission(this, audioPermission) == android.content.pm.PackageManager.PERMISSION_GRANTED) reloadTracks()
         setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Panel)) { App(tracks, controller) { reloadTracks() } } }
     }
 }
@@ -145,10 +156,39 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     var trim by remember { mutableStateOf<TrimJob?>(null) }
     var pendingEdit by remember { mutableStateOf<TrackEdit?>(null) }
     var editDialogTrack by remember { mutableStateOf<Track?>(null) }
-    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.7.3") }
+    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.7.4") }
     var ytDlpReady by remember { mutableStateOf<Boolean?>(null) }
     var ytDlpInitError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val exportSettingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) scope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching {
+                ctx.contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { it.write(exportAppSettingsBackup(ctx)) }
+                    ?: error("Could not open the backup destination")
+            } }
+            Toast.makeText(ctx, if (result.isSuccess) "Library settings exported" else "Could not export settings: " + result.exceptionOrNull()?.message, Toast.LENGTH_LONG).show()
+        }
+    }
+    val importSettingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching {
+                val content = ctx.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                    ?: error("Could not read the selected backup")
+                importAppSettingsBackup(ctx, content)
+            } }
+            if (result.isSuccess) {
+                folder = prefs.getString("folder", null)
+                folderRoots = prefs.getStringSet("folders_v2", null)?.toList() ?: listOfNotNull(folder)
+                folderUris = prefs.getStringSet("folder_uris_v2", null)?.mapNotNull { entry -> entry.split("\t", limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] } }?.toMap().orEmpty()
+                folderLabel = prefs.getString("folderLabel", null)
+                folderTree = prefs.getString("folderUri", null)
+                onFolderChange(folder)
+                refresh++
+                Toast.makeText(ctx, "Library settings restored. Re-select folders if Android requests access.", Toast.LENGTH_LONG).show()
+            } else Toast.makeText(ctx, "Could not import settings: " + result.exceptionOrNull()?.message, Toast.LENGTH_LONG).show()
+        }
+    }
+
     LaunchedEffect(Unit) {
         val initialized = withContext(Dispatchers.IO) { runCatching {
             YoutubeDL.getInstance().init(ctx.applicationContext)
@@ -282,6 +322,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
                 onPlay = { selected -> if (player != null) { val keepShuffle = shuffle || player.shuffleModeEnabled; player.setMediaItems(visibleTracks.map { it.toMediaItem() }, visibleTracks.indexOf(selected), 0); player.shuffleModeEnabled = keepShuffle; player.prepare(); player.play(); shuffle = keepShuffle; inPlayer = true } },
                 onMiniOpen = { val wasPlaying = player?.isPlaying == true; inPlayer = true; if (wasPlaying) player?.play() },
                 onMiniPlay = { if (player != null) { if (playing) player.pause() else player.play() } },
+                onExportBackup = { exportSettingsLauncher.launch("CanvasPlayer-settings.json") }, onImportBackup = { importSettingsLauncher.launch(arrayOf("application/json", "text/*")) },
                 onEdit = { edit ->
                     pendingEdit = edit
                     if (Build.VERSION.SDK_INT >= 30) {
@@ -315,16 +356,16 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
         }
     } }
-    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.3").apply() },
-        title = { Text("Canvas Player 0.7.3") },
+    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.4").apply() },
+        title = { Text("Canvas Player 0.7.4") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
             Text("What’s new", style = MaterialTheme.typography.titleMedium)
-            Text("• Scan selected folders directly so songs appear even when Android has not indexed them\n• Reload lyrics for each track and follow the current playback position\n• Keep manual video sync available when a video has no audio waveform\n• Downloaded videos are saved as companion videos and shown in the player\n• Find more relevant album covers faster and return to the current song in the library after leaving Now Playing\n• Show all indexed songs by default and keep Artists and Albums available without a folder filter.")
-        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.3").apply() }) { Text("Got it") } })
+            Text("• Scan selected folders directly so songs appear even when Android has not indexed them\n• Reload lyrics for each track and follow the current playback position\n• Keep manual video sync available when a video has no audio waveform\n• Downloaded videos are saved as companion videos and shown in the player\n• Find more relevant album covers faster and return to the current song in the library after leaving Now Playing\n• Show all indexed songs by default and keep Artists and Albums available without a folder filter\n• Cache the library index across app updates and refresh it when Android reports media changes\n• Import and export library filters and playback sync settings\n• Download a smaller APK built for your device architecture.")
+        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.4").apply() }) { Text("Got it") } })
     } }
 }
 
-@Composable private fun LibraryScreen(tracks: List<Track>, current: Track?, playing: Boolean, folder: String?, onChooseFolder: () -> Unit, onRefreshScan: () -> Unit, refreshingFolderScan: Boolean, onClearFolder: () -> Unit, onShuffle: () -> Unit, onPlay: (Track) -> Unit, onMiniOpen: () -> Unit, onMiniPlay: () -> Unit, onEdit: (TrackEdit) -> Unit, returnToCurrentTrack: Int, songListState: LazyListState) {
+@Composable private fun LibraryScreen(tracks: List<Track>, current: Track?, playing: Boolean, folder: String?, onChooseFolder: () -> Unit, onRefreshScan: () -> Unit, refreshingFolderScan: Boolean, onClearFolder: () -> Unit, onShuffle: () -> Unit, onPlay: (Track) -> Unit, onMiniOpen: () -> Unit, onMiniPlay: () -> Unit, onEdit: (TrackEdit) -> Unit, onExportBackup: () -> Unit, onImportBackup: () -> Unit, returnToCurrentTrack: Int, songListState: LazyListState) {
     var search by remember { mutableStateOf("") }
     var edit by remember { mutableStateOf<Track?>(null) }
     var section by remember { mutableStateOf("Songs") }
@@ -345,6 +386,8 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
                 DropdownMenu(listMenu, { listMenu = false }) {
                     DropdownMenuItem(text = { Text("Add music folder") }, onClick = { listMenu = false; onChooseFolder() }); if (folder != null) DropdownMenuItem(enabled = !refreshingFolderScan, text = { Text(if (refreshingFolderScan) "Refreshing scan…" else "Refresh selected folders") }, onClick = { listMenu = false; onRefreshScan() })
                     if (folder != null) DropdownMenuItem(text = { Text("Clear scanned folders") }, onClick = { listMenu = false; onClearFolder() })
+                    DropdownMenuItem(text = { Text("Export library backup") }, onClick = { listMenu = false; onExportBackup() })
+                    DropdownMenuItem(text = { Text("Import library backup") }, onClick = { listMenu = false; onImportBackup() })
                 }
             }
         }
@@ -549,7 +592,7 @@ private suspend fun searchDeezerCovers(
     val connection = api.openConnection().apply {
         connectTimeout = 5_000
         readTimeout = 7_000
-        setRequestProperty("User-Agent", "CanvasPlayer/0.7.3")
+        setRequestProperty("User-Agent", "CanvasPlayer/0.7.4")
     }
     val json = try { connection.getInputStream().bufferedReader().use { it.readText() } }
         finally { (connection as? HttpURLConnection)?.disconnect() }
@@ -576,7 +619,7 @@ private suspend fun searchDeezerCovers(
             val imageConnection = URL(candidate.imageUrl).openConnection().apply {
                 connectTimeout = 5_000
                 readTimeout = 7_000
-                setRequestProperty("User-Agent", "CanvasPlayer/0.7.3")
+                setRequestProperty("User-Agent", "CanvasPlayer/0.7.4")
             }
             val bytes = try { imageConnection.getInputStream().use { it.readBytes() } }
                 finally { (imageConnection as? HttpURLConnection)?.disconnect() }
@@ -1111,3 +1154,6 @@ private fun splitArtists(value: String): List<String> {
 
 
 The focused UI element is 1 AXWebArea raw.githubusercontent.com/zavxoz234-create/Mp3-canvas/main/app/src/main/java/com/example/canvasplayer/MainActivity.kt
+
+
+The focused UI element is 1 AXWebArea raw.githubusercontent.com/zavxoz234-create/Mp3-canvas/2877820020bb9c034c40ba7f31576daec9a4f021/app/src/main/java/com/example/canvasplayer/MainActivity.kt
