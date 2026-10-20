@@ -145,7 +145,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     var trim by remember { mutableStateOf<TrimJob?>(null) }
     var pendingEdit by remember { mutableStateOf<TrackEdit?>(null) }
     var editDialogTrack by remember { mutableStateOf<Track?>(null) }
-    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.7.2") }
+    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.7.3") }
     var ytDlpReady by remember { mutableStateOf<Boolean?>(null) }
     var ytDlpInitError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -315,12 +315,12 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
         }
     } }
-    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.2").apply() },
-        title = { Text("Canvas Player 0.7.2") },
+    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.3").apply() },
+        title = { Text("Canvas Player 0.7.3") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
             Text("What’s new", style = MaterialTheme.typography.titleMedium)
-            Text("• Scan selected folders directly so songs appear even when Android has not indexed them\n• Reload lyrics for each track and follow the current playback position\n• Keep manual video sync available when a video has no audio waveform\n• Downloaded videos are saved as companion videos and shown in the player\n• Find more relevant album covers faster and return to the current song in the library after leaving Now Playing.")
-        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.2").apply() }) { Text("Got it") } })
+            Text("• Scan selected folders directly so songs appear even when Android has not indexed them\n• Reload lyrics for each track and follow the current playback position\n• Keep manual video sync available when a video has no audio waveform\n• Downloaded videos are saved as companion videos and shown in the player\n• Find more relevant album covers faster and return to the current song in the library after leaving Now Playing\n• Show all indexed songs by default and keep Artists and Albums available without a folder filter.")
+        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.3").apply() }) { Text("Got it") } })
     } }
 }
 
