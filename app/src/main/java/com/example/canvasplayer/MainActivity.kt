@@ -431,19 +431,14 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             else -> emptyList()
         }
         val songRows = if (selectedGroup != null) groupTracks.filter { it.title.contains(search, true) } else shown
-        LaunchedEffect(returnToCurrentTrack, current?.id, section, selectedGroup, search, tracks) {
-            if (returnToCurrentTrack > 0 && current != null) {
-                val rowIndex = songRows.indexOfFirst { it.id == current.id }
-                if (rowIndex >= 0 && (section == "Songs" || selectedGroup != null)) {
-                    songListState.animateScrollToItem(rowIndex + if (selectedGroup != null) 1 else 0)
-                } else {
-                    section = "Songs"
-                    selectedGroup = null
-                    val matchesSearch = current.title.contains(search, true) || current.artist.contains(search, true) || current.album.contains(search, true) || current.albumArtist.contains(search, true)
-                    if (!matchesSearch) search = ""
-                }
-            }
+     LaunchedEffect(returnToCurrentTrack) {
+    if (returnToCurrentTrack > 0 && current != null) {
+        val rowIndex = songRows.indexOfFirst { it.id == current.id }
+        if (rowIndex >= 0) {
+            songListState.animateScrollToItem(rowIndex)
         }
+    }
+}
         when {
             tracks.isEmpty() -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
