@@ -10,8 +10,8 @@ android {
         applicationId = "com.example.canvasplayer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.7.4"
+        versionCode = 13
+        versionName = "0.7.5"
     }
     splits {
         abi {
@@ -34,19 +34,3 @@ dependencies {
     implementation("androidx.media3:media3-session:$media3")
     implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.media3:media3-transformer:$media3")
-    implementation("androidx.media3:media3-effect:$media3")
-    implementation("androidx.media3:media3-common:$media3")
-    implementation(platform("androidx.compose:compose-bom:2024.10.01"))
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-core")
-    implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.documentfile:documentfile:1.0.1")
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("io.coil-kt:coil-compose:2.7.0")
-    implementation("androidx.compose.material:material-icons-extended")
-    implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
-    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
-    implementation("net.jthink:jaudiotagger:3.0.1")
-}
