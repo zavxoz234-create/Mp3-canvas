@@ -1,6 +1,7 @@
 package com.example.canvasplayer
 
 import android.Manifest
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
@@ -9,6 +10,9 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.basicMarquee
@@ -75,7 +79,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.documentfile.provider.DocumentFile
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import com.yausername.ffmpeg.FFmpeg
@@ -152,7 +155,10 @@ class MainActivity : ComponentActivity() {
         perms.launch(requestedPermissions)
         val audioPermission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
         if (ContextCompat.checkSelfPermission(this, audioPermission) == android.content.pm.PackageManager.PERMISSION_GRANTED) reloadTracks()
-        setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Panel)) { App(tracks, controller) { reloadTracks() } } }
+        setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Mint, background = Ink, surface = Panel)) { App(tracks, controller, onFolderChange = { reloadTracks() }, onLibraryEdited = { edit ->
+            tracks = tracks.map { t -> if (t.id == edit.track.id) t.copy(title = edit.title.ifBlank { t.title }, artist = edit.artist.ifBlank { t.artist }, album = edit.album, albumArtist = edit.albumArtist) else t }
+            MediaStoreTrackCache.clear(this)
+        }) } }
     }
 }
 
@@ -168,7 +174,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     } else listOf(edit.track)
 }
 
-@Composable private fun App(tracks: List<Track>, player: Player?, onFolderChange: (String?) -> Unit) {
+@Composable private fun App(tracks: List<Track>, player: Player?, onFolderChange: (String?) -> Unit, onLibraryEdited: (TrackEdit) -> Unit) {
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("library", 0) }
     var folder by remember { mutableStateOf(prefs.getString("folder", null)) }
@@ -234,7 +240,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
         if (result.resultCode == android.app.Activity.RESULT_OK && edit != null) scope.launch {
             val saved = withContext(Dispatchers.IO) { runCatching { writeTrackTags(ctx, edit, tracks) } }
             if (saved.isSuccess) {
-                if (folder != null) onFolderChange(folder)
+                onLibraryEdited(edit)
                 refresh++
                 ArtCache.invalidate(); Toast.makeText(ctx, "Tags and album cover saved into the MP3", Toast.LENGTH_LONG).show()
             } else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
@@ -280,6 +286,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             runCatching { ctx.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            runCatching { ctx.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
             val docId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull()
             val volume = docId?.substringBefore(':')
             val relative = docId?.substringAfter(':', "").orEmpty()
@@ -355,16 +362,17 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
                 onExportBackup = { exportSettingsLauncher.launch("CanvasPlayer-settings.json") }, onImportBackup = { importSettingsLauncher.launch(arrayOf("application/json", "text/*")) },
                 onEdit = { edit ->
                     pendingEdit = edit
-                    if (Build.VERSION.SDK_INT >= 30) {
+                    val mediaStoreTargets = artworkTargets(edit, tracks).filter { it.documentUri == null }
+                    if (Build.VERSION.SDK_INT >= 30 && mediaStoreTargets.isNotEmpty()) {
                         runCatching {
-                            val request = MediaStore.createWriteRequest(ctx.contentResolver, artworkTargets(edit, tracks).map { it.uri })
+                            val request = MediaStore.createWriteRequest(ctx.contentResolver, mediaStoreTargets.map { it.uri })
                             editPermission.launch(IntentSenderRequest.Builder(request.intentSender).build())
                         }.onFailure { pendingEdit = null; Toast.makeText(ctx, "Could not request permission to edit this song: ${it.message}", Toast.LENGTH_LONG).show() }
                     } else {
                         scope.launch {
                             val saved = withContext(Dispatchers.IO) { runCatching { writeTrackTags(ctx, edit, tracks) } }
                             pendingEdit = null
-                            if (saved.isSuccess) { if (folder != null) onFolderChange(folder); refresh++; ArtCache.invalidate(); Toast.makeText(ctx, "Tags and album cover saved into the MP3", Toast.LENGTH_LONG).show() }
+                            if (saved.isSuccess) { onLibraryEdited(edit); refresh++; ArtCache.invalidate(); Toast.makeText(ctx, "Tags and album cover saved into the MP3", Toast.LENGTH_LONG).show() }
                             else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                         }
                     }
@@ -374,15 +382,16 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     editDialogTrack?.let { item -> EditTrackDialog(item, tracks.count { it.belongsToSameAlbum(item) }, onDismiss = { editDialogTrack = null }) { edit ->
         editDialogTrack = null
         pendingEdit = edit
-        if (Build.VERSION.SDK_INT >= 30) {
+        val mediaStoreTargets = artworkTargets(edit, tracks).filter { it.documentUri == null }
+        if (Build.VERSION.SDK_INT >= 30 && mediaStoreTargets.isNotEmpty()) {
             runCatching {
-                val request = MediaStore.createWriteRequest(ctx.contentResolver, artworkTargets(edit, tracks).map { it.uri })
+                val request = MediaStore.createWriteRequest(ctx.contentResolver, mediaStoreTargets.map { it.uri })
                 editPermission.launch(IntentSenderRequest.Builder(request.intentSender).build())
             }.onFailure { pendingEdit = null; Toast.makeText(ctx, "Could not request permission to edit this song: ${it.message}", Toast.LENGTH_LONG).show() }
         } else scope.launch {
             val saved = withContext(Dispatchers.IO) { runCatching { writeTrackTags(ctx, edit, tracks) } }
             pendingEdit = null
-            if (saved.isSuccess) { if (folder != null) onFolderChange(folder); refresh++; ArtCache.invalidate(); Toast.makeText(ctx, "Tags and album cover saved into the MP3", Toast.LENGTH_LONG).show() }
+            if (saved.isSuccess) { onLibraryEdited(edit); refresh++; ArtCache.invalidate(); Toast.makeText(ctx, "Tags and album cover saved into the MP3", Toast.LENGTH_LONG).show() }
             else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
         }
     } }
@@ -397,6 +406,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
 
 @Composable private fun LibraryScreen(tracks: List<Track>, current: Track?, playing: Boolean, folder: String?, onChooseFolder: () -> Unit, onRefreshScan: () -> Unit, refreshingFolderScan: Boolean, onClearFolder: () -> Unit, onShuffle: () -> Unit, onPlay: (Track) -> Unit, onMiniOpen: () -> Unit, onMiniPlay: () -> Unit, onEdit: (TrackEdit) -> Unit, onExportBackup: () -> Unit, onImportBackup: () -> Unit, returnToCurrentTrack: Int, songListState: LazyListState) {
     var search by remember { mutableStateOf("") }
+    var searching by remember { mutableStateOf(false) }
     var edit by remember { mutableStateOf<Track?>(null) }
     var section by remember { mutableStateOf("Songs") }
     var selectedGroup by remember { mutableStateOf<String?>(null) }
@@ -411,7 +421,9 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column { Text("CANVAS", style = MaterialTheme.typography.labelLarge, color = LocalAccent.current); Text("Your music", style = MaterialTheme.typography.headlineMedium) }
-            Box {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { searching = !searching; if (!searching) search = "" }) { Icon(if (searching) Icons.Default.Close else Icons.Default.Search, "Search", tint = LocalAccent.current) }
+                Box {
                 IconButton(onClick = { listMenu = true }) { Icon(Icons.Default.MoreVert, "Library options", tint = LocalAccent.current) }
                 DropdownMenu(listMenu, { listMenu = false }) {
                     DropdownMenuItem(text = { Text("Add music folder") }, onClick = { listMenu = false; onChooseFolder() }); if (folder != null) DropdownMenuItem(enabled = !refreshingFolderScan, text = { Text(if (refreshingFolderScan) "Refreshing scan…" else "Refresh selected folders") }, onClick = { listMenu = false; onRefreshScan() })
@@ -419,19 +431,14 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
                     DropdownMenuItem(text = { Text("Export library backup") }, onClick = { listMenu = false; onExportBackup() })
                     DropdownMenuItem(text = { Text("Import library backup") }, onClick = { listMenu = false; onImportBackup() })
                 }
+                }
             }
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(folder?.let { "Scanning selected folders: $it" } ?: "Showing all songs · choose folders to filter", color = Color.LightGray, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        AnimatedVisibility(visible = searching, modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), placeholder = { Text("Search songs, artists, albums") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true, shape = RoundedCornerShape(18.dp))
         }
-        OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), placeholder = { Text("Search songs, artists, albums") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true, shape = RoundedCornerShape(18.dp))
         TabRow(selectedTabIndex = listOf("Songs", "Artists", "Albums").indexOf(section), containerColor = Ink) {
             listOf("Songs", "Artists", "Albums").forEachIndexed { index, tab -> Tab(selected = section == tab, onClick = { section = tab; selectedGroup = null }, text = { Text(tab) }) }
-        }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onShuffle, enabled = tracks.isNotEmpty()) { Icon(Icons.Default.Shuffle, "Shuffle songs", tint = LocalAccent.current) }
-            Text("Shuffle", color = Color.LightGray, modifier = Modifier.clickable(enabled = tracks.isNotEmpty(), onClick = onShuffle))
-            Spacer(Modifier.weight(1f))
         }
         val groupKey = selectedGroup
         val groupCount = if (groupKey == null) 0 else if (section == "Artists") artists[groupKey]?.second?.size ?: 0 else albums[groupKey].orEmpty().size
@@ -442,6 +449,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) { Text(groupTitle.uppercase(), style = MaterialTheme.typography.labelMedium, color = LocalAccent.current); Text(if (selectedGroup != null) "$groupCount tracks" else when(section) { "Artists" -> "${artists.size} artists"; "Albums" -> "${albums.size} albums"; else -> "${shown.size} tracks" }, style = MaterialTheme.typography.titleLarge) }
+            IconButton(onClick = onShuffle, enabled = tracks.isNotEmpty()) { Icon(Icons.Default.Shuffle, "Shuffle songs", tint = LocalAccent.current) }
         }
         val groupTracks = when {
             section == "Artists" && selectedGroup != null -> artists[selectedGroup]?.second.orEmpty()
@@ -511,6 +519,8 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     }
     edit?.let { item -> EditTrackDialog(item, tracks.count { it.belongsToSameAlbum(item) }, onDismiss = { edit = null }) { onEdit(it); edit = null } }
 }
+
+private val waveformCache = android.util.LruCache<String, WaveformData>(8)
 
 private val ArtPlaceholder = Brush.linearGradient(listOf(Color(0xFF26473A), Color(0xFF111A16)))
 
@@ -842,7 +852,7 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
 @Composable private fun PlayerScreen(track: Track, queueTracks: List<Track>, player: Player, playing: Boolean, shuffle: Boolean, refresh: Int, ytDlpReady: Boolean?, ytDlpInitError: String?, folderTree: String?, rootFolder: String?, onBack: () -> Unit, onShuffle: () -> Unit, onYtDlpInit: (Boolean, String?) -> Unit, onTrim: (Uri, Boolean) -> Unit, onChanged: () -> Unit, onEditTrack: () -> Unit) {
     val ctx = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var lyricsMode by remember { mutableStateOf(false) }; var menu by remember { mutableStateOf(false) }; var pendingLyrics by remember { mutableStateOf(false) }; var matches by remember { mutableStateOf<List<DocumentFile>?>(null) }; val pos = remember(track.id) { mutableLongStateOf(0L) }
+    var lyricsMode by remember { mutableStateOf(false) }; var menu by remember { mutableStateOf(false) }; var pendingLyrics by remember { mutableStateOf(false) }; val pos = remember(track.id) { mutableLongStateOf(0L) }
     val syncPrefs = remember { ctx.getSharedPreferences("video_sync", 0) }
     var videoOffset by remember(track.id) { mutableLongStateOf(syncPrefs.getLong("offset_${track.id}", 0L)) }
     var syncDialog by remember { mutableStateOf(false) }
@@ -884,9 +894,6 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
         } finally { autoStatus.value = null }
     }
     val pickVideo = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) onTrim(uri, pendingLyrics) }
-    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) { runCatching { ctx.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }; val root = DocumentFile.fromTreeUri(ctx, uri); val files = root?.let { MetadataMatcher.findVideosRecursively(it) }.orEmpty(); matches = MetadataMatcher.match(files, track); if (matches.isNullOrEmpty()) Toast.makeText(ctx, "No video matching ${track.title} found in that folder", Toast.LENGTH_LONG).show() }
-    }
     val normalVideo: Uri? = visuals?.second
     val video = if (lyricsMode) visuals?.third ?: normalVideo else normalVideo
     val swipeThreshold = with(androidx.compose.ui.platform.LocalDensity.current) { 72.dp.toPx() }
@@ -910,7 +917,11 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
         if (syncDialog && video != null) {
             loadingWaveforms = true
             val data = withContext(Dispatchers.IO) {
-                WaveformAnalyzer.read(ctx, track.uri, fallbackPath = track.path) to WaveformAnalyzer.read(ctx, video)
+                val audio = waveformCache.get("a${track.id}")
+                    ?: WaveformAnalyzer.read(ctx, track.uri, fallbackPath = track.path)?.also { waveformCache.put("a${track.id}", it) }
+                val videoWave = waveformCache.get(video.toString())
+                    ?: WaveformAnalyzer.read(ctx, video)?.also { waveformCache.put(video.toString(), it) }
+                audio to videoWave
             }
             audioWaveform = data.first; videoWaveform = data.second
             loadingWaveforms = false
@@ -928,15 +939,6 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
                 DropdownMenu(menu, { menu = false }) {
                     DropdownMenuItem(text = { Text("Edit song tags") }, onClick = { menu = false; onEditTrack() })
                     DropdownMenuItem(text = { Text("Sync video to song") }, onClick = { menu = false; syncDialog = true })
-                    DropdownMenuItem(text = { Text("Check for matching video") }, onClick = { menu = false; scope.launch {
-                        val local = withContext(Dispatchers.IO) { Store.find(ctx, track, false) }
-                        if (local != null) Toast.makeText(ctx, "Video found and shown for ${track.title}", Toast.LENGTH_LONG).show()
-                        else if (!folderTree.isNullOrBlank()) {
-                            val found = withContext(Dispatchers.IO) { DocumentFile.fromTreeUri(ctx, Uri.parse(folderTree))?.let { root -> MetadataMatcher.match(MetadataMatcher.findVideosRecursively(root), track) }.orEmpty() }
-                            if (found.isNotEmpty()) matches = found else Toast.makeText(ctx, "No matching video found. Pick a video file or folder.", Toast.LENGTH_LONG).show()
-                        } else Toast.makeText(ctx, "No matching video found. Pick a video file or folder.", Toast.LENGTH_LONG).show()
-                        onChanged()
-                    } })
                     DropdownMenuItem(text = { Text("Find official video now") }, onClick = { menu = false; scope.launch {
                         if (!VideoFinder.networkAllowed(ctx, ignoreWifiOnly = true)) { Toast.makeText(ctx, "No internet connection", Toast.LENGTH_LONG).show(); return@launch }
                         VideoPrefs.clear(ctx, track.id)
@@ -951,7 +953,6 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
                     DropdownMenuItem(text = { Text(if (autoFindEnabled) "Auto-find official videos: on" else "Auto-find official videos: off") }, onClick = { menu = false; autoFindEnabled = !autoFindEnabled; VideoPrefs.setAutoEnabled(ctx, autoFindEnabled) })
                     DropdownMenuItem(text = { Text(if (wifiOnly) "Auto-download on Wi-Fi only: on" else "Auto-download on Wi-Fi only: off") }, onClick = { menu = false; wifiOnly = !wifiOnly; VideoPrefs.setWifiOnly(ctx, wifiOnly) })
                     DropdownMenuItem(text = { Text("Choose video file") }, onClick = { menu = false; pendingLyrics = false; pickVideo.launch("video/*") })
-                    DropdownMenuItem(text = { Text("Find video in folder") }, onClick = { menu = false; pendingLyrics = false; pickFolder.launch(null) })
                     DropdownMenuItem(text = { Text("Choose lyrics video") }, onClick = { menu = false; pendingLyrics = true; pickVideo.launch("video/*") })
                     DropdownMenuItem(text = { Text("Download video with yt-dlp") }, onClick = { menu = false; downloadUrl = ""; variants = emptyList(); selectedVariant = null; downloadDialog = true })
                     DropdownMenuItem(text = { Text("Remove companion videos") }, onClick = { menu = false; Store.appFile(ctx, track, false).delete(); Store.appFile(ctx, track, true).delete(); VideoPrefs.markRemoved(ctx, track.id); onChanged() })
@@ -959,23 +960,44 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
             }
         }
         Spacer(Modifier.weight(.4f))
-        Box(Modifier.fillMaxWidth().aspectRatio(1f)
-            .graphicsLayer {
-                translationX = dragOffset * .55f
-                rotationZ = dragOffset / size.width * 5f
-                alpha = 1f - (kotlin.math.abs(dragOffset) / (size.width * 2f)).coerceIn(0f, .3f)
+        AnimatedContent(
+            targetState = track.id,
+            transitionSpec = {
+                (slideInHorizontally(tween(300)) { it / 3 } + fadeIn(tween(300)))
+                    .togetherWith(slideOutHorizontally(tween(240)) { -it / 3 } + fadeOut(tween(240)))
+            },
+            modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+                .graphicsLayer {
+                    translationX = dragOffset * .55f
+                    rotationZ = dragOffset / size.width * 5f
+                    alpha = 1f - (kotlin.math.abs(dragOffset) / (size.width * 2f)).coerceIn(0f, .3f)
+                }
+                .clip(RoundedCornerShape(26.dp)).background(Panel)
+        ) { targetTrackId ->
+            val artTrack = queueTracks.firstOrNull { it.id == targetTrackId } ?: track
+            Box(Modifier.fillMaxSize().then(if (targetTrackId == track.id) artworkGestures else Modifier)) {
+                if (targetTrackId == track.id) {
+                    // Canvas video if there is one (album art disappears once it is playing), otherwise the album art.
+                    ArtBox(video, player, videoOffset, Modifier.fillMaxSize()) { AlbumArt(track, Modifier.fillMaxSize(), decodePx = 1024) }
+                    // Lyrics float over the art/canvas, so the video player keeps running instead of being rebuilt.
+                    LyricsOverlay(lyricsMode, track, lyrics, pos, player)
+                } else {
+                    AlbumArt(artTrack, Modifier.fillMaxSize(), decodePx = 1024)
+                }
             }
-            .clip(RoundedCornerShape(26.dp)).background(Panel).then(artworkGestures)) {
-            // Canvas video if there is one (album art disappears once it is playing), otherwise the album art.
-            ArtBox(video, player, videoOffset, Modifier.fillMaxSize()) { AlbumArt(track, Modifier.fillMaxSize(), decodePx = 1024) }
-            // Lyrics float over the art/canvas, so the video player keeps running instead of being rebuilt.
-            LyricsOverlay(lyricsMode, track, lyrics, pos, player)
         }
         Spacer(Modifier.height(26.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                MarqueeText(track.title, style = MaterialTheme.typography.headlineSmall)
-                MarqueeText(track.artist + if (track.album.isBlank()) "" else " · ${track.album}", color = Color.LightGray)
+            AnimatedContent(
+                targetState = track.id,
+                transitionSpec = { fadeIn(tween(260)) togetherWith fadeOut(tween(200)) },
+                modifier = Modifier.weight(1f)
+            ) { targetTrackId ->
+                val textTrack = queueTracks.firstOrNull { it.id == targetTrackId } ?: track
+                Column(Modifier.padding(end = 12.dp)) {
+                    MarqueeText(textTrack.title, style = MaterialTheme.typography.headlineSmall)
+                    MarqueeText(textTrack.artist + if (textTrack.album.isBlank()) "" else " · ${textTrack.album}", color = Color.LightGray)
+                }
             }
             FilterChip(lyricsMode, { lyricsMode = !lyricsMode }, label = { Text("Lyrics") })
         }
@@ -994,7 +1016,6 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
         Spacer(Modifier.weight(.4f))
     }
     }
-    matches?.takeIf { it.isNotEmpty() }?.let { list -> AlertDialog(onDismissRequest = { matches = null }, title = { Text("Matching videos") }, text = { Column { list.forEach { file -> TextButton(onClick = { matches = null; onTrim(file.uri, pendingLyrics) }) { Text(file.name ?: "Choose video") } } } }, confirmButton = { TextButton(onClick = { matches = null }) { Text("Cancel") } }) }
     if (syncDialog) AlertDialog(onDismissRequest = { syncDialog = false }, title = { Text("Sync companion video") },
         text = { Column {
             Text("Drag the video waveform to line up a beat. If waveforms cannot be decoded, play the track and use the manual offset controls below.", color = Color.LightGray)
@@ -1207,7 +1228,7 @@ private fun writeTrackTags(context: android.content.Context, edit: TrackEdit, al
     }
     val changedPaths = mutableListOf<String>()
     targets.forEach { target ->
-            val source = File(context.cacheDir, "tag-source-${target.id}.mp3")
+            val source = File(context.cacheDir, "tag-source-${target.id}.${target.path.substringAfterLast('.', "mp3")}")
             val output = File(context.cacheDir, "tag-output-${target.id}.mp3")
             try {
                 context.contentResolver.openInputStream(target.uri)?.use { input -> source.outputStream().use { input.copyTo(it) } }
@@ -1244,6 +1265,7 @@ private fun writeTrackTags(context: android.content.Context, edit: TrackEdit, al
             }
     }
     MediaScannerConnection.scanFile(context, changedPaths.toTypedArray(), Array(changedPaths.size) { "audio/mpeg" }, null)
+    MediaStoreTrackCache.clear(context)
 }
 
 /** Splits multi-artist text while protecting common names that contain a slash. */

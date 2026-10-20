@@ -31,6 +31,11 @@ import org.jaudiotagger.tag.FieldKey
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** Shared pool for metadata reads during library scans; one retriever per thread instead of a slow serial pass. */
+private val scanExecutor: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newFixedThreadPool(
+    minOf(8, Runtime.getRuntime().availableProcessors().coerceAtLeast(2))
+)
+
 data class Track(
     val id: Long, val title: String, val artist: String,
     val album: String, val albumId: Long, val path: String, val durationMs: Long = 0L,
@@ -147,101 +152,100 @@ fun loadTracks(c: Context, rootFolder: String? = null): List<Track> {
     )?.use { cur ->
         val albumArtistIndex = if (Build.VERSION.SDK_INT >= 29) cur.getColumnIndex(MediaStore.Audio.Media.ALBUM_ARTIST) else -1
         while (cur.moveToNext()) {
-            val id = cur.getLong(0)
-            val track = Track(
-                id, cur.getString(1) ?: "Unknown", cur.getString(2) ?: "Unknown",
+            out += Track(
+                cur.getLong(0), cur.getString(1) ?: "Unknown", cur.getString(2) ?: "Unknown",
                 cur.getString(3) ?: "", cur.getLong(4), cur.getString(5) ?: "", cur.getLong(6),
                 if (albumArtistIndex >= 0) cur.getString(albumArtistIndex).orEmpty().trim() else ""
             )
-            // MediaStore often omits ALBUM_ARTIST even when it is embedded in the MP3.
-            val albumArtist = track.albumArtist.ifBlank { readEmbeddedAlbumArtist(c, track) }
-            out += track.copy(albumArtist = albumArtist)
         }
     }
-    return out
+    // MediaStore often omits ALBUM_ARTIST even when it is embedded in the MP3.
+    // Look the missing ones up in parallel; doing it one-by-one took minutes on big libraries.
+    val missing = out.filter { it.albumArtist.isBlank() }
+    if (missing.isEmpty()) return out
+    val fixed = HashMap<Long, String>(missing.size)
+    val futures = missing.map { track ->
+        scanExecutor.submit<Pair<Long, String>> { track.id to readEmbeddedAlbumArtist(c, track) }
+    }
+    for (future in futures) runCatching { val (id, albumArtist) = future.get(); fixed[id] = albumArtist }
+    return out.map { track -> if (track.albumArtist.isBlank()) track.copy(albumArtist = fixed[track.id].orEmpty()) else track }
 }
 
 /** Read selected SAF folders directly so songs do not disappear when Android has not indexed them in MediaStore. */
 fun loadTracksFromSelectedFolders(context: Context, folders: List<Pair<String, String>>): List<Track> {
     val supported = setOf("mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "wma", "aiff", "ape")
-    val results = LinkedHashMap<String, Track>()
+    val audioFiles = mutableListOf<Triple<String, DocumentFile, String>>() // rootPath, file, relative path
     var visited = 0
+
+    fun visit(rootPath: String, directory: DocumentFile, relative: String, depth: Int) {
+        if (depth > 16 || visited >= 20_000) return
+        val children = runCatching { directory.listFiles().toList() }.getOrDefault(emptyList())
+        for (child in children) {
+            if (visited++ >= 20_000) break
+            val name = child.name ?: continue
+            val childRelative = if (relative.isBlank()) name else "$relative/$name"
+            if (child.isDirectory) {
+                visit(rootPath, child, childRelative, depth + 1)
+            } else if (child.isFile && name.substringAfterLast('.', "").lowercase() in supported) {
+                audioFiles += Triple(rootPath, child, childRelative)
+            }
+        }
+    }
 
     folders.forEach { (rootPath, treeUri) ->
         val root = runCatching { DocumentFile.fromTreeUri(context, Uri.parse(treeUri)) }.getOrNull() ?: return@forEach
-        fun visit(directory: DocumentFile, relative: String, depth: Int) {
-            if (depth > 16 || visited >= 20_000) return
-            val children = runCatching { directory.listFiles().toList() }.getOrDefault(emptyList())
-            for (child in children) {
-                if (visited++ >= 20_000) break
-                val name = child.name ?: continue
-                val childRelative = if (relative.isBlank()) name else "$relative/$name"
-                if (child.isDirectory) {
-                    visit(child, childRelative, depth + 1)
-                } else if (child.isFile && name.substringAfterLast('.', "").lowercase() in supported) {
-                    val trackUri = child.uri
-                    val retriever = MediaMetadataRetriever()
-                    val metadata = try {
-                        retriever.setDataSource(context, trackUri)
-                        Triple(
-                            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE).orEmpty(),
-                            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST).orEmpty(),
-                            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).orEmpty()
-                        )
-                    } catch (_: Exception) { Triple("", "", "") }
-                    val duration = runCatching {
-                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                    }.getOrDefault(0L)
-                    val albumArtist = runCatching {
-                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST).orEmpty()
-                    }.getOrDefault("")
-                    runCatching { retriever.release() }
-                    val fallbackTitle = name.substringBeforeLast('.', name)
-                    val absolutePath = rootPath.trimEnd('/') + "/" + childRelative
-                    val uriKey = trackUri.toString()
-                    val uriHash = uriKey.hashCode().toLong() and 0xffffffffL
-                    val id = Long.MIN_VALUE + uriHash
-                    results[absolutePath.lowercase()] = Track(
-                        id = id,
-                        title = metadata.first.ifBlank { fallbackTitle },
-                        artist = metadata.second.ifBlank { "Unknown artist" },
-                        album = metadata.third,
-                        albumId = 0L,
-                        path = absolutePath,
-                        durationMs = duration,
-                        albumArtist = albumArtist,
-                        documentUri = trackUri
-                    )
-                }
-            }
+        visit(rootPath, root, "", 0)
+    }
+
+    // Read tags in parallel: one MediaMetadataRetriever per worker thread. A serial per-file
+    // pass is what made adding a folder take minutes.
+    val results = LinkedHashMap<String, Track>()
+    val futures = audioFiles.map { (rootPath, child, childRelative) ->
+        scanExecutor.submit<Pair<String, Track?>> {
+            val absolutePath = rootPath.trimEnd('/') + "/" + childRelative
+            val retriever = MediaMetadataRetriever()
+            val track = try {
+                val trackUri = child.uri
+                retriever.setDataSource(context, trackUri)
+                val name = child.name.orEmpty()
+                val uriHash = trackUri.toString().hashCode().toLong() and 0xffffffffL
+                Track(
+                    id = Long.MIN_VALUE + uriHash,
+                    title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE).orEmpty()
+                        .ifBlank { name.substringBeforeLast('.', name) },
+                    artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST).orEmpty()
+                        .ifBlank { "Unknown artist" },
+                    album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).orEmpty(),
+                    albumId = 0L,
+                    path = absolutePath,
+                    durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L,
+                    albumArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST).orEmpty(),
+                    documentUri = trackUri
+                )
+            } catch (_: Exception) { null } finally { runCatching { retriever.release() } }
+            absolutePath.lowercase() to track
         }
-        visit(root, "", 0)
+    }
+    for (future in futures) {
+        runCatching { val (key, track) = future.get(); if (track != null) results[key] = track }
     }
     return results.values.toList()
 }
 
 /** MediaStore and MediaMetadataRetriever both omit TPE2 on some Android builds; read the MP3 tag directly as a fallback. */
 private fun readEmbeddedAlbumArtist(context: Context, track: Track): String {
-    val uri = track.uri
+    if (track.albumArtist.isNotBlank()) return track.albumArtist
     val retriever = MediaMetadataRetriever()
     val retrieverValue = try {
-        retriever.setDataSource(context, uri)
+        retriever.setDataSource(context, track.uri)
         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST).orEmpty().trim()
     } catch (_: Exception) { "" } finally { runCatching { retriever.release() } }
     if (retrieverValue.isNotBlank()) return retrieverValue
 
     val local = File(track.path)
-    val cachedCopy = File(context.cacheDir, "album-artist-${track.id}.audio")
-    return try {
-        val source = if (local.isFile && local.canRead()) local else {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                cachedCopy.outputStream().use { output -> input.copyTo(output) }
-            } ?: return ""
-            cachedCopy
-        }
-        AudioFileIO.read(source).tag?.getFirst(FieldKey.ALBUM_ARTIST).orEmpty().trim()
-    } catch (_: Exception) { "" }
-    finally { cachedCopy.delete() }
+    if (!local.isFile || !local.canRead()) return ""
+    return runCatching { AudioFileIO.read(local).tag?.getFirst(FieldKey.ALBUM_ARTIST).orEmpty().trim() }
+        .getOrDefault("")
 }
 
 /** Finds the first and last audible decoder buffers in a downloaded video's audio stream. */
@@ -411,7 +415,6 @@ object WaveformAnalyzer {
                 }
             }
             val peak = levels.maxOrNull()?.coerceAtLeast(.001f) ?: return null
-            if (peak <= .0011f) return null
             return WaveformData(durationMs, levels.map { (kotlin.math.sqrt(it / peak)).coerceIn(.06f, 1f) })
         } catch (_: Exception) {
             return null
@@ -587,6 +590,8 @@ object MediaStoreTrackCache {
             if (!temporary.renameTo(file)) { file.delete(); check(temporary.renameTo(file)) }
         }
     }
+
+    fun clear(context: Context) { cacheFile(context).delete() }
 }
 
 
