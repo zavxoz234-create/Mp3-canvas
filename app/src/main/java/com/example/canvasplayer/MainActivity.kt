@@ -1153,7 +1153,7 @@ private fun splitArtists(value: String): List<String> {
 }
 
 
-The focused UI element is 1 AXWebArea raw.githubusercontent.com/zavxoz234-create/Mp3-canvas/main/app/src/main/java/com/example/canvasplayer/MainActivity.kt
 
 
-The focused UI element is 1 AXWebArea raw.githubusercontent.com/zavxoz234-create/Mp3-canvas/2877820020bb9c034c40ba7f31576daec9a4f021/app/src/main/java/com/example/canvasplayer/MainActivity.kt
+
+
