@@ -541,3 +541,94 @@ object SelectedFolderScanCache {
     fun clear(context: Context) { cacheFile(context).delete() }
 }
 
+
+
+The focused UI element is 1 AXWebArea raw.githubusercontent.com/zavxoz234-create/Mp3-canvas/main/app/src/main/java/com/example/canvasplayer/Data.kt
+
+/** Reuse MediaStore results across launches and app updates while the indexed media volume is unchanged. */
+object MediaStoreTrackCache {
+    private const val FILE_NAME = "media-store-library.json"
+    private fun cacheFile(context: Context) = File(context.filesDir, FILE_NAME)
+    private fun version(context: Context): String = if (Build.VERSION.SDK_INT >= 29)
+        MediaStore.getVersion(context, MediaStore.VOLUME_EXTERNAL) else MediaStore.getVersion(context)
+
+    fun load(context: Context): List<Track>? = runCatching {
+        val payload = JSONObject(cacheFile(context).readText(Charsets.UTF_8))
+        if (payload.optString("version") != version(context)) return null
+        val entries = payload.optJSONArray("tracks") ?: return null
+        List(entries.length()) { index ->
+            val item = entries.getJSONObject(index)
+            Track(item.getLong("id"), item.optString("title", "Unknown"), item.optString("artist", "Unknown"),
+                item.optString("album"), item.optLong("albumId"), item.optString("path"), item.optLong("durationMs"),
+                item.optString("albumArtist"))
+        }
+    }.getOrNull()
+
+    fun save(context: Context, tracks: List<Track>) {
+        runCatching {
+            val payload = JSONObject().put("version", version(context))
+            val entries = JSONArray()
+            tracks.forEach { track -> entries.put(JSONObject()
+                .put("id", track.id).put("title", track.title).put("artist", track.artist)
+                .put("album", track.album).put("albumId", track.albumId).put("path", track.path)
+                .put("durationMs", track.durationMs).put("albumArtist", track.albumArtist)) }
+            payload.put("tracks", entries)
+            val file = cacheFile(context)
+            val temporary = File(context.filesDir, FILE_NAME + ".tmp")
+            temporary.writeText(payload.toString(), Charsets.UTF_8)
+            if (!temporary.renameTo(file)) { file.delete(); check(temporary.renameTo(file)) }
+        }
+    }
+}
+
+
+private const val SETTINGS_BACKUP_FORMAT = "canvas-player-settings-backup"
+private val SETTINGS_BACKUP_PREFS = listOf("library", "video_sync")
+
+fun exportAppSettingsBackup(context: Context): String {
+    val preferences = JSONObject()
+    SETTINGS_BACKUP_PREFS.forEach { name ->
+        val values = JSONObject()
+        context.getSharedPreferences(name, Context.MODE_PRIVATE).all.forEach { (key, value) ->
+            val encoded = when (value) {
+                is String -> JSONObject().put("type", "string").put("value", value)
+                is Boolean -> JSONObject().put("type", "boolean").put("value", value)
+                is Int -> JSONObject().put("type", "int").put("value", value)
+                is Long -> JSONObject().put("type", "long").put("value", value)
+                is Float -> JSONObject().put("type", "float").put("value", value.toDouble())
+                is Set<*> -> JSONObject().put("type", "string_set").put("value", JSONArray(value.filterIsInstance<String>()))
+                else -> null
+            }
+            if (encoded != null) values.put(key, encoded)
+        }
+        preferences.put(name, values)
+    }
+    return JSONObject().put("format", SETTINGS_BACKUP_FORMAT).put("version", 1).put("preferences", preferences).toString(2)
+}
+
+fun importAppSettingsBackup(context: Context, content: String) {
+    val backup = JSONObject(content)
+    require(backup.optString("format") == SETTINGS_BACKUP_FORMAT) { "This is not a Canvas Player settings backup" }
+    val preferences = backup.getJSONObject("preferences")
+    SETTINGS_BACKUP_PREFS.forEach { name ->
+        val values = preferences.optJSONObject(name) ?: return@forEach
+        val editor = context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear()
+        val keys = values.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val value = values.optJSONObject(key) ?: continue
+            when (value.optString("type")) {
+                "string" -> editor.putString(key, value.optString("value"))
+                "boolean" -> editor.putBoolean(key, value.optBoolean("value"))
+                "int" -> editor.putInt(key, value.optInt("value"))
+                "long" -> editor.putLong(key, value.optLong("value"))
+                "float" -> editor.putFloat(key, value.optDouble("value").toFloat())
+                "string_set" -> {
+                    val array = value.optJSONArray("value") ?: JSONArray()
+                    editor.putStringSet(key, (0 until array.length()).map { array.optString(it) }.toSet())
+                }
+            }
+        }
+        editor.apply()
+    }
+}
