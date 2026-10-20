@@ -1,3 +1,4 @@
+package com.example.canvasplayer
 
 import android.Manifest
 import android.content.ComponentName
