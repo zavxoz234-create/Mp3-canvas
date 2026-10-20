@@ -1243,10 +1243,13 @@ private fun writeTrackTags(context: android.content.Context, edit: TrackEdit, al
                     artwork.setBinaryData(bytes); artwork.setMimeType("image/jpeg"); artwork.setPictureType(3)
                     tag.deleteArtworkField(); tag.setField(artwork)
                 }
-                AudioFileIO.write(audio)
+             AudioFileIO.write(audio)
                 source.copyTo(output, overwrite = true)
-                context.contentResolver.openOutputStream(target.uri, "wt")?.use { stream -> output.inputStream().use { it.copyTo(stream) } }
-                    ?: error("Could not write changes to ${target.title}")
+                context.contentResolver.openFileDescriptor(target.uri, "w")?.use { pfd ->
+                    android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd).use { stream ->
+                        output.inputStream().use { it.copyTo(stream) }
+                    }
+                } ?: error("Could not write changes to ${target.title}")
                 changedPaths += target.path
             } finally {
                 source.delete(); output.delete()
