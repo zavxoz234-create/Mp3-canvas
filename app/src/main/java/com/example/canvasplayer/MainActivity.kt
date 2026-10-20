@@ -107,9 +107,20 @@ class MainActivity : ComponentActivity() {
         reloadJob = reloadScope.launch {
             val cached = withContext(Dispatchers.IO) { MediaStoreTrackCache.load(this@MainActivity) }
             if (cached != null) { tracks = cached; return@launch }
-            val loaded = withContext(Dispatchers.IO) { loadTracks(this@MainActivity) }
-            tracks = loaded
-            withContext(Dispatchers.IO) { MediaStoreTrackCache.save(this@MainActivity, loaded) }
+            val lastKnown = withContext(Dispatchers.IO) { MediaStoreTrackCache.loadLastKnown(this@MainActivity) }
+            if (!lastKnown.isNullOrEmpty()) tracks = lastKnown
+            // Android may invalidate its MediaStore version before finishing a rescan. Retry briefly,
+            // and never replace a useful saved library with that temporary empty result.
+            var loaded = emptyList<Track>()
+            for (attempt in 0..2) {
+                loaded = withContext(Dispatchers.IO) { loadTracks(this@MainActivity) }
+                if (loaded.isNotEmpty() || attempt == 2) break
+                delay(700L * (attempt + 1))
+            }
+            if (loaded.isNotEmpty() || lastKnown.isNullOrEmpty()) {
+                tracks = loaded
+                if (loaded.isNotEmpty()) withContext(Dispatchers.IO) { MediaStoreTrackCache.save(this@MainActivity, loaded) }
+            }
         }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -589,13 +600,21 @@ private suspend fun searchDeezerCovers(
     if (query.isBlank()) return@coroutineScope emptyList()
     val endpoint = if (byAlbum) "album" else "track"
     val api = URL("https://api.deezer.com/search/$endpoint?q=${Uri.encode(query)}&limit=25")
-    val connection = api.openConnection().apply {
+    val connection = (api.openConnection() as HttpURLConnection).apply {
         connectTimeout = 5_000
         readTimeout = 7_000
         setRequestProperty("User-Agent", "CanvasPlayer/0.7.4")
     }
-    val json = try { connection.getInputStream().bufferedReader().use { it.readText() } }
-        finally { (connection as? HttpURLConnection)?.disconnect() }
+    val responseCode = connection.responseCode
+    val json = try {
+        val stream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
+        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        check(responseCode in 200..299) {
+            val detail = runCatching { JSONObject(body).optJSONObject("error")?.optString("message") }.getOrNull()
+            "Deezer search failed (HTTP $responseCode)${detail?.takeIf(String::isNotBlank)?.let { ": $it" }.orEmpty()}"
+        }
+        body
+    } finally { connection.disconnect() }
     val data = JSONObject(json).optJSONArray("data") ?: return@coroutineScope emptyList()
     data class Candidate(val album: JSONObject, val artist: String, val imageUrl: String)
     val expectedTitle = normalizeCoverMatch(if (byAlbum) expectedAlbum else expectedSong)
@@ -606,23 +625,38 @@ private suspend fun searchDeezerCovers(
         val title = normalizeCoverMatch(item.optString("title"))
         val artist = item.optJSONObject("artist")?.optString("name").orEmpty()
             .ifBlank { album.optJSONObject("artist")?.optString("name").orEmpty() }
-        if (title != expectedTitle || normalizeCoverMatch(artist) != expectedArtist) return@mapNotNull null
-        val imageUrl = album.optString(if (highResolution) "cover_xl" else "cover_big")
-            .takeIf { it.startsWith("https://") }
-            ?: album.optString("cover_big").takeIf { it.startsWith("https://") }
-            ?: return@mapNotNull null
-        Candidate(album, artist, imageUrl)
-    }.distinctBy { it.album.optString("id", it.album.optString("title")) }.take(8)
+        val titleScore = when {
+            title == expectedTitle -> 4
+            title.contains(expectedTitle) || expectedTitle.contains(title) -> 2
+            else -> 0
+        }
+        val artistNorm = normalizeCoverMatch(artist)
+        val artistScore = when {
+            artistNorm == expectedArtist -> 4
+            artistNorm.contains(expectedArtist) || expectedArtist.contains(artistNorm) -> 2
+            else -> 0
+        }
+        val imageUrl = sequenceOf(
+            album.optString(if (highResolution) "cover_xl" else "cover_big"),
+            album.optString("cover_big"), album.optString("cover_medium"), album.optString("cover")
+        ).firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
+            ?.replaceFirst("http://", "https://") ?: return@mapNotNull null
+        Triple(Candidate(album, artist, imageUrl), titleScore + artistScore, index)
+    }.distinctBy { it.first.album.optString("id", it.first.album.optString("title")) }
+        .sortedWith(compareByDescending<Triple<Candidate, Int, Int>> { it.second }.thenBy { it.third })
+        .take(8).map { it.first }
 
     candidates.map { candidate -> async(Dispatchers.IO) {
         runCatching {
-            val imageConnection = URL(candidate.imageUrl).openConnection().apply {
+            val imageConnection = (URL(candidate.imageUrl).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 5_000
                 readTimeout = 7_000
                 setRequestProperty("User-Agent", "CanvasPlayer/0.7.4")
             }
-            val bytes = try { imageConnection.getInputStream().use { it.readBytes() } }
-                finally { (imageConnection as? HttpURLConnection)?.disconnect() }
+            val bytes = try {
+                check(imageConnection.responseCode in 200..299) { "Deezer image request failed (${imageConnection.responseCode})" }
+                imageConnection.inputStream.use { it.readBytes() }
+            } finally { imageConnection.disconnect() }
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
