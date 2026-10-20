@@ -1,4 +1,3 @@
-package com.example.canvasplayer
 
 import android.Manifest
 import android.content.ComponentName
@@ -30,6 +29,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -71,6 +71,9 @@ import org.jaudiotagger.audio.AudioFileIO
 import org.jaudiotagger.tag.FieldKey
 import org.jaudiotagger.tag.images.ArtworkFactory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -132,6 +135,8 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     var folderTree by remember { mutableStateOf(prefs.getString("folderUri", null)) }
     var visibleTracks by remember { mutableStateOf(tracks) }; var scannedFolderTracks by remember { mutableStateOf<List<Track>?>(null) }; var refreshingFolderScan by remember { mutableStateOf(false) }
     var inPlayer by remember { mutableStateOf(false) }
+    var returnToCurrentTrack by remember { mutableIntStateOf(0) }
+    val librarySongListState = rememberLazyListState()
     var currentId by remember { mutableStateOf<String?>(null) }
     var playing by remember { mutableStateOf(false) }
     var shuffle by remember { mutableStateOf(false) }
@@ -246,7 +251,8 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     LaunchedEffect(track?.id, refresh) {
         accent = withContext(Dispatchers.IO) { track?.let { accentFromArtwork(ctx, it) } ?: Mint }
     }
-    BackHandler(job != null || inPlayer) { if (job != null) trim = null else inPlayer = false }
+    val leavePlayer = { inPlayer = false; returnToCurrentTrack++ }
+    BackHandler(job != null || inPlayer) { if (job != null) trim = null else leavePlayer() }
     val scheme = darkColorScheme(
         primary = accent, onPrimary = Ink, primaryContainer = accent.copy(alpha = .28f), onPrimaryContainer = Color.White,
         secondary = accent, onSecondary = Ink, secondaryContainer = accent.copy(alpha = .22f), onSecondaryContainer = Color.White,
@@ -265,7 +271,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             "player" -> if (player != null && track != null) PlayerScreen(track, tracks, player, playing, shuffle, refresh, ytDlpReady, ytDlpInitError,
                 folderUris.entries.firstOrNull { (root, _) -> track.path.replace("\\", "/").startsWith(root.replace("\\", "/").trimEnd('/') + "/", true) }?.value ?: folderTree,
                 folderRoots.firstOrNull { root -> track.path.replace("\\", "/").startsWith(root.replace("\\", "/").trimEnd('/') + "/", true) } ?: folder,
-                onBack = { inPlayer = false }, onShuffle = { shuffle = !shuffle; player.shuffleModeEnabled = shuffle },
+                onBack = { leavePlayer() }, onShuffle = { shuffle = !shuffle; player.shuffleModeEnabled = shuffle },
                 onYtDlpInit = { ready, error -> ytDlpReady = ready; ytDlpInitError = error },
                 onTrim = { uri, lyrics -> trim = TrimJob(uri, lyrics, track) }, onChanged = { refresh++ },
                 onEditTrack = { editDialogTrack = track })
@@ -307,7 +313,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             if (saved.isSuccess) { if (folder != null) onFolderChange(folder); refresh++; Toast.makeText(ctx, "Tags and album cover saved into the MP3", Toast.LENGTH_LONG).show() }
             else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
         }
-    } }
+    }, returnToCurrentTrack = returnToCurrentTrack, songListState = librarySongListState) }
     if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.2").apply() },
         title = { Text("Canvas Player 0.7.2") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
@@ -317,7 +323,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     } }
 }
 
-@Composable private fun LibraryScreen(tracks: List<Track>, current: Track?, playing: Boolean, folder: String?, onChooseFolder: () -> Unit, onRefreshScan: () -> Unit, refreshingFolderScan: Boolean, onClearFolder: () -> Unit, onShuffle: () -> Unit, onPlay: (Track) -> Unit, onMiniOpen: () -> Unit, onMiniPlay: () -> Unit, onEdit: (TrackEdit) -> Unit) {
+@Composable private fun LibraryScreen(tracks: List<Track>, current: Track?, playing: Boolean, folder: String?, onChooseFolder: () -> Unit, onRefreshScan: () -> Unit, refreshingFolderScan: Boolean, onClearFolder: () -> Unit, onShuffle: () -> Unit, onPlay: (Track) -> Unit, onMiniOpen: () -> Unit, onMiniPlay: () -> Unit, onEdit: (TrackEdit) -> Unit, returnToCurrentTrack: Int, songListState: LazyListState) {
     var search by remember { mutableStateOf("") }
     var edit by remember { mutableStateOf<Track?>(null) }
     var section by remember { mutableStateOf("Songs") }
@@ -367,6 +373,19 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             else -> emptyList()
         }
         val songRows = if (selectedGroup != null) groupTracks.filter { it.title.contains(search, true) } else shown
+        LaunchedEffect(returnToCurrentTrack, current?.id, section, selectedGroup, search, tracks) {
+            if (returnToCurrentTrack > 0 && current != null) {
+                val rowIndex = songRows.indexOfFirst { it.id == current.id }
+                if (rowIndex >= 0 && (section == "Songs" || selectedGroup != null)) {
+                    songListState.animateScrollToItem(rowIndex + if (selectedGroup != null) 1 else 0)
+                } else {
+                    section = "Songs"
+                    selectedGroup = null
+                    val matchesSearch = current.title.contains(search, true) || current.artist.contains(search, true) || current.album.contains(search, true) || current.albumArtist.contains(search, true)
+                    if (!matchesSearch) search = ""
+                }
+            }
+        }
         when {
             tracks.isEmpty() -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -395,7 +414,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
                     }
                 }
             }
-            else -> LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 12.dp)) {
+            else -> LazyColumn(state = songListState, modifier = Modifier.weight(1f), contentPadding = PaddingValues(start = 14.dp, end = 14.dp, bottom = 12.dp)) {
                 if (selectedGroup != null) item { TextButton(onClick = { selectedGroup = null }) { Icon(Icons.Default.ArrowBack, null); Text(" Back to $section") } }
                 itemsIndexed(songRows, key = { _, t -> t.id }) { _, t ->
                     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable { onPlay(t) }.padding(vertical = 8.dp, horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -461,9 +480,9 @@ private fun imageDimensions(context: android.content.Context, uri: Uri): Pair<In
     fun search() {
         searching = true; error = null
         scope.launch {
-            val fetched = withContext(Dispatchers.IO) { runCatching { searchDeezerCovers(query.trim(), albumMode, highResolution) } }
+            val fetched = withContext(Dispatchers.IO) { runCatching { searchDeezerCovers(query.trim(), albumMode, highResolution, track.album, track.albumArtist.ifBlank { track.artist }, track.title, track.artist) } }
             searching = false
-            if (fetched.isSuccess) { results = fetched.getOrDefault(emptyList()); if (results.isEmpty()) error = "No cover results found. Try another search." }
+            if (fetched.isSuccess) { results = fetched.getOrDefault(emptyList()); if (results.isEmpty()) error = "No exact album or artist match found. Try adding the artist or album name." }
             else error = fetched.exceptionOrNull()?.message?.take(250) ?: "Cover search failed"
         }
     }
@@ -502,35 +521,69 @@ private fun imageDimensions(context: android.content.Context, uri: Uri): Pair<In
                         Text("${result.width}×${result.height}", Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp).clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = .82f)).padding(horizontal = 9.dp, vertical = 4.dp), color = Color.White, style = MaterialTheme.typography.labelMedium)
                     }
                     Text(result.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+                    Text(result.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color.LightGray, style = MaterialTheme.typography.labelSmall)
                 } }
                 if (pair.size == 1) Spacer(Modifier.weight(1f))
             } }
         } }, confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } })
 }
 
-private fun searchDeezerCovers(query: String, byAlbum: Boolean, highResolution: Boolean): List<CoverResult> {
+private fun normalizeCoverMatch(value: String): String = value.lowercase(Locale.ROOT)
+    .replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim().replace(Regex("\\s+"), " ")
+
+private suspend fun searchDeezerCovers(
+    query: String,
+    byAlbum: Boolean,
+    highResolution: Boolean,
+    expectedAlbum: String,
+    expectedAlbumArtist: String,
+    expectedSong: String,
+    expectedSongArtist: String
+): List<CoverResult> = coroutineScope {
+    if (query.isBlank()) return@coroutineScope emptyList()
     val endpoint = if (byAlbum) "album" else "track"
-    val api = URL("https://api.deezer.com/search/$endpoint?q=${Uri.encode(query)}&limit=12")
-    val json = api.openConnection().apply { connectTimeout = 12_000; readTimeout = 15_000; setRequestProperty("User-Agent", "CanvasPlayer/0.6.0") }
-        .getInputStream().bufferedReader().use { it.readText() }
-    val data = JSONObject(json).optJSONArray("data") ?: return emptyList()
-    return (0 until data.length()).mapNotNull { index ->
+    val api = URL("https://api.deezer.com/search/$endpoint?q=4{Uri.encode(query)}&limit=25")
+    val connection = api.openConnection().apply {
+        connectTimeout = 5_000
+        readTimeout = 7_000
+        setRequestProperty("User-Agent", "CanvasPlayer/0.7.3")
+    }
+    val json = try { connection.getInputStream().bufferedReader().use { it.readText() } }
+        finally { (connection as? HttpURLConnection)?.disconnect() }
+    val data = JSONObject(json).optJSONArray("data") ?: return@coroutineScope emptyList()
+    data class Candidate(val album: JSONObject, val artist: String, val imageUrl: String)
+    val expectedTitle = normalizeCoverMatch(if (byAlbum) expectedAlbum else expectedSong)
+    val expectedArtist = normalizeCoverMatch(if (byAlbum) expectedAlbumArtist else expectedSongArtist)
+    val candidates = (0 until data.length()).mapNotNull { index ->
         val item = data.optJSONObject(index) ?: return@mapNotNull null
         val album = if (byAlbum) item else item.optJSONObject("album") ?: return@mapNotNull null
-        val imageUrl = album.optString(if (highResolution) "cover_xl" else "cover_big").takeIf { it.startsWith("https://") }
+        val title = normalizeCoverMatch(item.optString("title"))
+        val artist = item.optJSONObject("artist")?.optString("name").orEmpty()
+            .ifBlank { album.optJSONObject("artist")?.optString("name").orEmpty() }
+        if (title != expectedTitle || normalizeCoverMatch(artist) != expectedArtist) return@mapNotNull null
+        val imageUrl = album.optString(if (highResolution) "cover_xl" else "cover_big")
+            .takeIf { it.startsWith("https://") }
             ?: album.optString("cover_big").takeIf { it.startsWith("https://") }
             ?: return@mapNotNull null
+        Candidate(album, artist, imageUrl)
+    }.distinctBy { it.album.optString("id", it.album.optString("title")) }.take(8)
+
+    candidates.map { candidate -> async(Dispatchers.IO) {
         runCatching {
-            val connection = URL(imageUrl).openConnection().apply { connectTimeout = 12_000; readTimeout = 15_000; setRequestProperty("User-Agent", "CanvasPlayer/0.6.0") }
-            val bytes = connection.getInputStream().use { it.readBytes() }
+            val imageConnection = URL(candidate.imageUrl).openConnection().apply {
+                connectTimeout = 5_000
+                readTimeout = 7_000
+                setRequestProperty("User-Agent", "CanvasPlayer/0.7.3")
+            }
+            val bytes = try { imageConnection.getInputStream().use { it.readBytes() } }
+                finally { (imageConnection as? HttpURLConnection)?.disconnect() }
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
-            CoverResult(item.optString("title", album.optString("title")), album.optString("title"), bytes, bounds.outWidth, bounds.outHeight)
+            CoverResult(candidate.album.optString("title"), candidate.artist, bytes, bounds.outWidth, bounds.outHeight)
         }.getOrNull()
-    }.filterNotNull()
+    } }.awaitAll().filterNotNull()
 }
-
 @Composable private fun EditTrackDialog(track: Track, albumTrackCount: Int, onDismiss: () -> Unit, onSave: (TrackEdit) -> Unit) {
     var title by remember(track.id) { mutableStateOf(track.title) }
     var trackNo by remember(track.id) { mutableStateOf("") }; var year by remember(track.id) { mutableStateOf("") }
