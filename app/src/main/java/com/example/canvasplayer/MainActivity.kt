@@ -97,7 +97,7 @@ class MainActivity : ComponentActivity() {
     }
     private val reloadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private fun reloadTracks(root: String? = null) {
-        reloadScope.launch { tracks = withContext(Dispatchers.IO) { loadTracks(this@MainActivity, root) } }
+        reloadScope.launch { tracks = withContext(Dispatchers.IO) { loadTracks(this@MainActivity) } }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
