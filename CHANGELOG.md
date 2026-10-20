@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.5 — 2026-10-20
+
+### Fixed and improved
+- Keep the last known library visible while Android rebuilds its media index, retry the scan, and avoid saving a temporary empty library over the cache.
+- Rank Deezer cover results by title and artist similarity, support Deezer's HTTP cover URLs through HTTPS, and report API or image request errors clearly.
+
 ## 0.7.1 — 2026-10-20
 
 ### Fixed and improved
