@@ -181,7 +181,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
         }
     }
     LaunchedEffect(tracks, folderRoots, folderUris, scannedFolderTracks) {
-        visibleTracks = if (folderRoots.isEmpty()) emptyList() else withContext(Dispatchers.IO) {
+        visibleTracks = if (folderRoots.isEmpty()) tracks else withContext(Dispatchers.IO) {
             val roots = folderRoots.map { it.replace("\\", "/").trimEnd('/') }
             val byPath = tracks.filter { track -> roots.any { root ->
                 val path = track.path.replace("\\", "/").trimEnd('/')
@@ -347,7 +347,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             }
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(folder?.let { "Scanning selected folders: $it" } ?: "Choose one or more music folders", color = Color.LightGray, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(folder?.let { "Scanning selected folders: $it" } ?: "Showing all songs · choose folders to filter", color = Color.LightGray, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), placeholder = { Text("Search songs, artists, albums") }, leadingIcon = { Icon(Icons.Default.Search, null) }, singleLine = true, shape = RoundedCornerShape(18.dp))
         TabRow(selectedTabIndex = listOf("Songs", "Artists", "Albums").indexOf(section), containerColor = Ink) {
