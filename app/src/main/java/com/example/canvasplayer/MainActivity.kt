@@ -139,7 +139,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     var trim by remember { mutableStateOf<TrimJob?>(null) }
     var pendingEdit by remember { mutableStateOf<TrackEdit?>(null) }
     var editDialogTrack by remember { mutableStateOf<Track?>(null) }
-    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.7.1") }
+    var showChangelog by remember { mutableStateOf(prefs.getString("seenChangelogVersion", "") != "0.7.2") }
     var ytDlpReady by remember { mutableStateOf<Boolean?>(null) }
     var ytDlpInitError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -170,27 +170,14 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
                 val path = track.path.replace("\\", "/").trimEnd('/')
                 path.startsWith("$root/", true) || path.equals(root, true)
             } }
-            val stems = mutableSetOf<String>()
-            fun visit(dir: DocumentFile, depth: Int) {
-                if (depth > 12 || stems.size > 20_000) return
-                runCatching { dir.listFiles().toList() }.getOrDefault(emptyList()).forEach { child ->
-                    if (child.isDirectory) visit(child, depth + 1)
-                    else if (child.isFile && child.name?.substringAfterLast('.', "")?.lowercase(Locale.ROOT)?.let { it in setOf("mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "wma") } == true) {
-                        child.name?.substringBeforeLast('.')?.let { stems += it.lowercase(Locale.ROOT) }
-                    }
-                }
+            val selectedFolders = folderRoots.mapNotNull { root ->
+                val treeUri = folderUris[root] ?: if (root == folder) folderTree else null
+                treeUri?.let { root to it }
             }
-            folderRoots.forEach { root ->
-                val uri = folderUris[root] ?: if (root == folder) folderTree else null
-                if (uri != null) runCatching { DocumentFile.fromTreeUri(ctx, Uri.parse(uri))?.let { visit(it, 0) } }
-            }
-            val names = byPath.map { it.id }.toSet()
-            (byPath + tracks.filter { track ->
-                track.id !in names && (
-                    track.path.substringAfterLast('/').substringBeforeLast('.').lowercase(Locale.ROOT) in stems ||
-                        track.title.lowercase(Locale.ROOT) in stems
-                    )
-            }).distinctBy { it.id }
+            val folderTracks = loadTracksFromSelectedFolders(ctx, selectedFolders)
+            val indexedPaths = byPath.map { it.path.replace("\\", "/").trimEnd('/').lowercase(Locale.ROOT) }.toSet()
+            (byPath + folderTracks.filterNot { it.path.replace("\\", "/").trimEnd('/').lowercase(Locale.ROOT) in indexedPaths })
+                .distinctBy { it.path.replace("\\", "/").trimEnd('/').lowercase(Locale.ROOT) }
         }
     }
     DisposableEffect(player) {
@@ -292,12 +279,12 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
         }
     } }
-    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.0").apply() },
-        title = { Text("Canvas Player 0.7.1") },
+    if (showChangelog) AlertDialog(onDismissRequest = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.2").apply() },
+        title = { Text("Canvas Player 0.7.2") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
             Text("What’s new", style = MaterialTheme.typography.titleMedium)
-            Text("• Reduce player stutter by removing the costly live artwork blur\n• Restore songs from selected folders when Android reports different file paths\n• Reload lyrics for each track and follow the current playback position\n• Keep manual video sync available when a video has no audio waveform\n• Downloaded videos are saved as companion videos and shown in the player")
-        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.1").apply() }) { Text("Got it") } })
+            Text("• Scan selected folders directly so songs appear even when Android has not indexed them\n• Reload lyrics for each track and follow the current playback position\n• Keep manual video sync available when a video has no audio waveform\n• Downloaded videos are saved as companion videos and shown in the player")
+        } }, confirmButton = { TextButton(onClick = { showChangelog = false; prefs.edit().putString("seenChangelogVersion", "0.7.2").apply() }) { Text("Got it") } })
     } }
 }
 

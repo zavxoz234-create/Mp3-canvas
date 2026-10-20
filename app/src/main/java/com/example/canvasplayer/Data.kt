@@ -32,19 +32,18 @@ import org.jaudiotagger.tag.FieldKey
 data class Track(
     val id: Long, val title: String, val artist: String,
     val album: String, val albumId: Long, val path: String, val durationMs: Long = 0L,
-    val albumArtist: String = ""
+    val albumArtist: String = "", val documentUri: Uri? = null
 ) {
-    val uri: Uri get() = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)
+    val uri: Uri get() = documentUri ?: ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)
     // Static art only: this is what the lock screen / notification receive.
     val artUri: Uri get() = Uri.parse("content://media/external/audio/albumart/$albumId")
 
     fun toMediaItem(): MediaItem = MediaItem.Builder()
         .setMediaId(id.toString())
         .setUri(uri)
-        .setMediaMetadata(
-            MediaMetadata.Builder().setTitle(title).setArtist(artist)
-                .setAlbumTitle(album).setAlbumArtist(albumArtist.ifBlank { artist }).setArtworkUri(artUri).build()
-        ).build()
+        .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(artist)
+            .setAlbumTitle(album).setAlbumArtist(albumArtist.ifBlank { artist })
+            .apply { if (documentUri == null && albumId > 0L) setArtworkUri(artUri) }.build()).build()
 }
 
 private fun normalizeGroupValue(value: String): String = Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
@@ -158,6 +157,65 @@ fun loadTracks(c: Context, rootFolder: String? = null): List<Track> {
         }
     }
     return out
+}
+
+/** Read selected SAF folders directly so songs do not disappear when Android has not indexed them in MediaStore. */
+fun loadTracksFromSelectedFolders(context: Context, folders: List<Pair<String, String>>): List<Track> {
+    val supported = setOf("mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "wma", "aiff", "ape")
+    val results = LinkedHashMap<String, Track>()
+    var visited = 0
+
+    folders.forEach { (rootPath, treeUri) ->
+        val root = runCatching { DocumentFile.fromTreeUri(context, Uri.parse(treeUri)) }.getOrNull() ?: return@forEach
+        fun visit(directory: DocumentFile, relative: String, depth: Int) {
+            if (depth > 16 || visited >= 20_000) return
+            val children = runCatching { directory.listFiles().toList() }.getOrDefault(emptyList())
+            for (child in children) {
+                if (visited++ >= 20_000) break
+                val name = child.name ?: continue
+                val childRelative = if (relative.isBlank()) name else "$relative/$name"
+                if (child.isDirectory) {
+                    visit(child, childRelative, depth + 1)
+                } else if (child.isFile && name.substringAfterLast('.', "").lowercase() in supported) {
+                    val trackUri = child.uri
+                    val retriever = MediaMetadataRetriever()
+                    val metadata = try {
+                        retriever.setDataSource(context, trackUri)
+                        Triple(
+                            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE).orEmpty(),
+                            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST).orEmpty(),
+                            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).orEmpty()
+                        )
+                    } catch (_: Exception) { Triple("", "", "") }
+                    val duration = runCatching {
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                    }.getOrDefault(0L)
+                    val albumArtist = runCatching {
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST).orEmpty()
+                    }.getOrDefault("")
+                    runCatching { retriever.release() }
+                    val fallbackTitle = name.substringBeforeLast('.', name)
+                    val absolutePath = rootPath.trimEnd('/') + "/" + childRelative
+                    val uriKey = trackUri.toString()
+                    val uriHash = uriKey.hashCode().toLong() and 0xffffffffL
+                    val id = Long.MIN_VALUE + uriHash
+                    results[absolutePath.lowercase()] = Track(
+                        id = id,
+                        title = metadata.first.ifBlank { fallbackTitle },
+                        artist = metadata.second.ifBlank { "Unknown artist" },
+                        album = metadata.third,
+                        albumId = 0L,
+                        path = absolutePath,
+                        durationMs = duration,
+                        albumArtist = albumArtist,
+                        documentUri = trackUri
+                    )
+                }
+            }
+        }
+        visit(root, "", 0)
+    }
+    return results.values.toList()
 }
 
 /** MediaStore and MediaMetadataRetriever both omit TPE2 on some Android builds; read the MP3 tag directly as a fallback. */
