@@ -534,27 +534,19 @@ private fun imageDimensions(context: android.content.Context, uri: Uri): Pair<In
     LaunchedEffect(track.id) { embedded = withContext(Dispatchers.IO) {
         runCatching { MediaMetadataRetriever().run { setDataSource(ctx, track.uri); val bytes = embeddedPicture; release(); bytes } }.getOrNull()
     } }
-    fun search() {
-        searching = true; error = null
-        scope.launch {
-            val fetched = withContext(Dispatchers.IO) { runCatching { searchDeezerCovers(query.trim(), albumMode, highResolution, track.album, track.albumArtist.ifBlank { track.artist }, track.title, track.artist) } }
-            searching = false
-            if (fetched.isSuccess) { results = fetched.getOrDefault(emptyList()); if (results.isEmpty()) error = "No exact album or artist match found. Try adding the artist or album name." }
-            else error = fetched.exceptionOrNull()?.message?.take(250) ?: "Cover search failed"
-        }
-    }
+    fun search() { val terms = "${query.trim().removeSuffix(" deezer")} deezer"; ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?tbm=isch&q=${Uri.encode(terms)}"))) }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Find album art") },
         text = { Column(Modifier.heightIn(max = 580.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(highResolution, { highResolution = it })
-                Text("High Resolution", modifier = Modifier.weight(1f))
+                Spacer(Modifier.width(1.dp))
+                Text("Images query: song or album + artist + Deezer", modifier = Modifier.weight(1f))
                 Icon(Icons.Default.Settings, "Deezer artwork search")
             }
             OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), label = { Text(if (albumMode) "Album and artist" else "Song and artist") }, singleLine = true)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(!albumMode, { albumMode = false; query = "${track.title} ${track.artist}" }, label = { Text("Song") })
                 FilterChip(albumMode, { albumMode = true; query = "${track.album} ${track.albumArtist.ifBlank { track.artist }}" }, label = { Text("Album") })
-                Button(onClick = ::search, enabled = !searching && query.isNotBlank()) { Text(if (searching) "Searching…" else "Search") }
+                Button(onClick = ::search, enabled = !searching && query.isNotBlank()) { Text(if (searching) "Searching…" else "Search Google") }
             }
             if (searching) LinearProgressIndicator(Modifier.fillMaxWidth())
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
