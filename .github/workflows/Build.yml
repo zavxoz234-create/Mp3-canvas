@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Optional version tag to publish as a GitHub Release, for example v0.2.0'
+        description: 'Optional release tag override; otherwise a unique versioned build release is created'
         required: false
         type: string
 
@@ -19,6 +19,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      release_tag: ${{ steps.release_tag.outputs.tag }}
 
     steps:
     - name: Checkout Repository
@@ -52,6 +54,26 @@ jobs:
           exit "$build_status"
         fi
 
+    - name: Determine release tag
+      id: release_tag
+      shell: bash
+      env:
+        REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+      run: |
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          tag="$GITHUB_REF_NAME"
+        elif [[ -n "$REQUESTED_RELEASE_TAG" ]]; then
+          tag="$REQUESTED_RELEASE_TAG"
+        else
+          version="$(sed -n 's/.*versionName = \"\([^\"]*\)\".*/\1/p' app/build.gradle.kts | head -n 1)"
+          if [[ -z "$version" ]]; then
+            echo 'Could not read versionName from app/build.gradle.kts' >&2
+            exit 1
+          fi
+          tag="v${version}-build.${GITHUB_RUN_NUMBER}"
+        fi
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
@@ -59,7 +81,6 @@ jobs:
         path: app/build/outputs/apk/debug/app-debug.apk
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -74,7 +95,9 @@ jobs:
     - name: Publish GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ inputs.release_tag || github.ref_name }}
-        target_commitish: main
+        tag_name: ${{ needs.build.outputs.release_tag }}
+        target_commitish: ${{ github.sha }}
+        name: ${{ needs.build.outputs.release_tag }}
         generate_release_notes: true
+        prerelease: ${{ contains(needs.build.outputs.release_tag, '-build.') }}
         files: release-assets/app-debug.apk
