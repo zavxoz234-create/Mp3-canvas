@@ -1,6 +1,7 @@
 package com.example.canvasplayer
 
 import android.net.Uri
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -8,6 +9,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -27,7 +29,6 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 
-/** Audio only. The session exposes static artwork, so lock screen / notification never show video. */
 class PlaybackService : MediaSessionService() {
     private var session: MediaSession? = null
 
@@ -49,15 +50,18 @@ class PlaybackService : MediaSessionService() {
     }
 }
 
-/** Art box: video if available, otherwise static album art. */
+/** Art box: Automatically loads and plays Spotify Canvas / video when present, hiding static album art. */
 @Composable
 fun ArtBox(videoUri: Uri?, staticArt: Uri, audio: Player, offsetMs: Long = 0L, modifier: Modifier = Modifier) {
-    Box(modifier) {
-        if (videoUri != null) LoopingVideo(videoUri, audio, offsetMs)
-        else AsyncImage(
-            model = staticArt, contentDescription = null,
-            modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop
-        )
+    Box(modifier.background(Color.Black)) {
+        if (videoUri != null) {
+            LoopingVideo(videoUri, audio, offsetMs)
+        } else {
+            AsyncImage(
+                model = staticArt, contentDescription = null,
+                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop
+            )
+        }
     }
 }
 
@@ -69,7 +73,7 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long = 0L) {
         ExoPlayer.Builder(ctx).build().apply {
             volume = 0f
             repeatMode = Player.REPEAT_MODE_ONE
-            setAudioAttributes(AudioAttributes.DEFAULT, false) // never steal audio focus
+            setAudioAttributes(AudioAttributes.DEFAULT, false)
         }
     }
 
@@ -77,7 +81,7 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long = 0L) {
         vp.setMediaItem(MediaItem.fromUri(uri))
         vp.prepare()
         vp.playWhenReady = audio.isPlaying
-        while (true) { // keep the video aligned with the audio position
+        while (true) {
             val dur = vp.duration
             if (dur > 0 && dur != C.TIME_UNSET) {
                 val target = Math.floorMod(audio.currentPosition - offsetMs, dur)
