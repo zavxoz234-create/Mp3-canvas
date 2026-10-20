@@ -51,6 +51,3 @@ dependencies {
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
     implementation("net.jthink:jaudiotagger:3.0.1")
 }
-
-
-The focused UI element is 1 AXWebArea raw.githubusercontent.com/zavxoz234-create/Mp3-canvas/main/app/build.gradle.kts
