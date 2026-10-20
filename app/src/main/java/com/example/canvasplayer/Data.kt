@@ -28,6 +28,8 @@ import java.io.BufferedReader
 import java.text.Normalizer
 import org.jaudiotagger.audio.AudioFileIO
 import org.jaudiotagger.tag.FieldKey
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class Track(
     val id: Long, val title: String, val artist: String,
@@ -496,3 +498,46 @@ object Exporter {
             .start(edited, out.absolutePath)
     }
 }
+
+/** Persists the last selected-folder scan so opening the app never rescans storage automatically. */
+object SelectedFolderScanCache {
+    private const val FILE_NAME = "selected-folder-scan.json"
+    private fun cacheFile(context: Context) = File(context.filesDir, FILE_NAME)
+    private fun foldersKey(folders: List<Pair<String, String>>): String = folders
+        .map { (path, uri) -> path.replace('\\', '/').trimEnd('/') + "\u0000" + uri }.sorted().joinToString("\n")
+
+    fun load(context: Context, folders: List<Pair<String, String>>): List<Track>? = runCatching {
+        val file = cacheFile(context)
+        if (!file.isFile) return null
+        val payload = JSONObject(file.readText(Charsets.UTF_8))
+        if (payload.optString("folders") != foldersKey(folders)) return null
+        val entries = payload.optJSONArray("tracks") ?: JSONArray()
+        List(entries.length()) { index ->
+            val item = entries.getJSONObject(index)
+            val uri = item.optString("uri").takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
+            Track(item.getLong("id"), item.optString("title", "Unknown"), item.optString("artist", "Unknown artist"),
+                item.optString("album"), item.optLong("albumId"), item.optString("path"), item.optLong("durationMs"),
+                item.optString("albumArtist"), uri)
+        }
+    }.getOrNull()
+
+    fun save(context: Context, folders: List<Pair<String, String>>, tracks: List<Track>) {
+        runCatching {
+            val payload = JSONObject().put("folders", foldersKey(folders))
+            val entries = JSONArray()
+            tracks.forEach { track -> entries.put(JSONObject()
+                .put("id", track.id).put("title", track.title).put("artist", track.artist)
+                .put("album", track.album).put("albumId", track.albumId).put("path", track.path)
+                .put("durationMs", track.durationMs).put("albumArtist", track.albumArtist)
+                .put("uri", track.documentUri?.toString().orEmpty())) }
+            payload.put("tracks", entries)
+            val file = cacheFile(context)
+            val temporary = File(context.filesDir, FILE_NAME + ".tmp")
+            temporary.writeText(payload.toString(), Charsets.UTF_8)
+            if (!temporary.renameTo(file)) { file.delete(); check(temporary.renameTo(file)) }
+        }
+    }
+
+    fun clear(context: Context) { cacheFile(context).delete() }
+}
+
