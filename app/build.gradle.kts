@@ -10,8 +10,8 @@ android {
         applicationId = "com.example.canvasplayer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.7.2"
+        versionCode = 11
+        versionName = "0.7.3"
         ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64") }
     }
     buildFeatures { compose = true }
