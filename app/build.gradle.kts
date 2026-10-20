@@ -10,9 +10,17 @@ android {
         applicationId = "com.example.canvasplayer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.7.3"
+        versionCode = 12
+        versionName = "0.7.4"
         ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64") }
+    }
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            isUniversalApk = false
+        }
     }
     buildFeatures { compose = true }
     compileOptions {
@@ -43,3 +51,6 @@ dependencies {
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
     implementation("net.jthink:jaudiotagger:3.0.1")
 }
+
+
+The focused UI element is 1 AXWebArea raw.githubusercontent.com/zavxoz234-create/Mp3-canvas/main/app/build.gradle.kts
