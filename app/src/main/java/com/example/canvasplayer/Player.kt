@@ -77,16 +77,18 @@ fun ArtBox(videoUri: Uri?, audio: Player, offsetMs: Long = 0L, modifier: Modifie
 }
 
 /**
- * Renders into a TextureView instead of PlayerView's default SurfaceView. A SurfaceView ignores Compose's
- * rounded clip, alpha and translation, which is what made the artwork animations glitch while video played.
- * The view fits the whole video centred, so portrait canvases are not cropped or stretched.
+ * TextureView that fits the whole video centred — never cropped, never stretched — and applies
+ * the video's own rotation metadata (vertical canvases are usually tagged 90/270 degrees).
  */
 private class CropTextureView(context: Context) : TextureView(context) {
     private var videoW = 0
     private var videoH = 0
+    private var rotationDeg = 0
 
-    fun setVideoSize(w: Int, h: Int) {
-        videoW = w; videoH = h
+    fun setVideoSize(size: VideoSize) {
+        videoW = (size.width * size.pixelWidthHeightRatio).toInt()
+        videoH = size.height
+        rotationDeg = size.unappliedRotationDegrees
         applyCrop()
     }
 
@@ -95,14 +97,25 @@ private class CropTextureView(context: Context) : TextureView(context) {
         applyCrop()
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        applyCrop()
+    }
+
     private fun applyCrop() {
         val w = width.toFloat(); val h = height.toFloat()
         if (videoW <= 0 || videoH <= 0 || w <= 0f || h <= 0f) return
-        // Fit the whole video inside the view, centred — never cropped, never stretched.
-        val scale = minOf(w / videoW, h / videoH)
+        // TextureView content is not rotated by ExoPlayer: swap dimensions for 90/270 so the
+        // fit math uses the orientation the viewer actually sees.
+        val rotated = rotationDeg == 90 || rotationDeg == 270
+        val effW = if (rotated) videoH else videoW
+        val effH = if (rotated) videoW else videoH
+        // Fit the WHOLE video inside the view, centred — never cropped, never stretched.
+        val scale = minOf(w / effW, h / effH)
         val m = Matrix()
         m.setScale(scale, scale)
         m.postTranslate((w - videoW * scale) / 2f, (h - videoH * scale) / 2f)
+        if (rotationDeg != 0) m.postRotate(rotationDeg.toFloat(), w / 2f, h / 2f)
         setTransform(m)
     }
 }
@@ -143,7 +156,7 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
         val l = object : Player.Listener {
             override fun onRenderedFirstFrame() { firstFrameCallback() }
             override fun onVideoSizeChanged(videoSize: VideoSize) {
-                texture.setVideoSize((videoSize.width * videoSize.pixelWidthHeightRatio).toInt(), videoSize.height)
+                texture.setVideoSize(videoSize)
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) syncVideo(vp, audio, offset, 300)
