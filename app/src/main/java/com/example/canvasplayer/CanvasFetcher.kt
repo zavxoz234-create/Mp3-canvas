@@ -40,7 +40,13 @@ object CanvasPrefs {
     fun clear(c: Context, trackId: Long) = p(c).edit().remove(retryKey(trackId)).apply()
 }
 
-/** Queries the canvas databases and downloads the mp4 into the track's companion-video slot. */
+/**
+ * Queries the canvas databases and downloads the mp4 into the track's companion-video slot.
+ *
+ * Lookups are multi-strategy because tag quality varies: the same song may be indexed under a
+ * clean title, a remastered title, or just its album. Each provider is tried with
+ * title+artist, then album+artist, then title alone, then album alone — first hit wins.
+ */
 object CanvasFinder {
     private fun enc(v: String) = URLEncoder.encode(v, "UTF-8")
 
@@ -75,6 +81,44 @@ object CanvasFinder {
         return out.distinct()
     }
 
+    // --- query variants -----------------------------------------------------
+
+    /** Strips the noise that usually breaks exact matching: (feat. X), [Remastered], " - Live", etc. */
+    private fun clean(s: String): String {
+        var v = s
+        v = v.replace(Regex("(?i)\\(feat\\.?[^)]*\\)"), "")
+        v = v.replace(Regex("(?i)\\(with [^)]*\\)"), "")
+        v = v.replace(Regex("(?i)\\[(feat|with|remaster(?:ed)?|live|acoustic|instrumental|radio|edit|single|version|bonus|deluxe|explicit|clean)[^]]*\\]"), "")
+        v = v.replace(Regex("(?i)\\s*[-–—]\\s*(remaster(?:ed)?|live|acoustic|instrumental|radio|edit|single|version|bonus|deluxe).*"), "")
+        return v.replace(Regex("\\s+"), " ").trim()
+    }
+
+    private fun firstArtist(artist: String) =
+        artist.substringBefore(",").substringBefore("/").substringBefore("&").substringBefore(" feat").trim()
+
+    /** Ordered lookup candidates: title+artist, album+artist, title alone, album alone. */
+    private fun queriesFor(track: Track): List<Pair<String, String>> {
+        val title = clean(track.title).substringBefore("(").trim()
+        val album = clean(track.album).trim()
+        val artist = clean(firstArtist(track.artist))
+        return listOfNotNull(
+            (title to artist).takeIf { title.isNotBlank() },
+            (album to artist).takeIf { album.isNotBlank() },
+            (title to "").takeIf { title.isNotBlank() },
+            (album to "").takeIf { album.isNotBlank() },
+        ).distinct()
+    }
+
+    private fun tryQueries(track: Track, query: (String, String) -> List<String>): List<String> {
+        for ((song, artist) in queriesFor(track)) {
+            val urls = runCatching { query(song, artist) }.getOrElse { emptyList() }
+            if (urls.isNotEmpty()) return urls
+        }
+        return emptyList()
+    }
+
+    // --- providers ----------------------------------------------------------
+
     private fun queryEcho(title: String, artist: String): List<String> {
         val body = get("https://api.echo.wesley.sh/canvases?song=${enc(title)}&artist=${enc(artist)}") ?: return emptyList()
         return urlsFromJson(body)
@@ -93,6 +137,17 @@ object CanvasFinder {
         return urlsFromJson(body).filter { it.endsWith(".mp4", true) }
     }
 
+    private fun tryApple(track: Track): List<String> {
+        val album = clean(track.album)
+        if (album.isBlank()) return emptyList()
+        val artist = clean(firstArtist(track.artist))
+        for (a in listOf(artist, "").distinct()) {
+            val urls = runCatching { queryApple(album, a) }.getOrElse { emptyList() }
+            if (urls.isNotEmpty()) return urls
+        }
+        return emptyList()
+    }
+
     private fun spotifyIdToGid(id: String): String {
         var n = BigInteger.ZERO
         val base = BigInteger.valueOf(62)
@@ -108,14 +163,12 @@ object CanvasFinder {
         return n.toString(16).padStart(32, '0')
     }
 
-    private fun querySpotify(title: String, artist: String): List<String> {
-        val token = get("https://open.spotify.com/get_access_token?reason=transport&productType=web_player")
-            ?.let { runCatching { JSONObject(it).getString("accessToken") }.getOrNull() } ?: return emptyList()
-        val auth = mapOf("Authorization" to "Bearer $token")
-        val search = get("https://api.spotify.com/v1/search?q=${enc("$artist $title")}&type=track&limit=3", auth) ?: return emptyList()
+    /** Runs a Spotify search query and pulls the canvas URL from the first few results. */
+    private fun spotifySearchCanvas(query: String, auth: Map<String, String>): List<String> {
+        val body = get("https://api.spotify.com/v1/search?q=${enc(query)}&type=track&limit=3", auth) ?: return emptyList()
         val urls = mutableListOf<String>()
         runCatching {
-            val items = JSONObject(search).getJSONObject("tracks").getJSONArray("items")
+            val items = JSONObject(body).getJSONObject("tracks").getJSONArray("items")
             for (i in 0 until minOf(items.length(), 3)) {
                 val id = items.getJSONObject(i).getString("id")
                 val meta = get("https://spclient.wgc.spotify.net/metadata/4/track/${spotifyIdToGid(id)}?market=from_token", auth) ?: continue
@@ -125,19 +178,39 @@ object CanvasFinder {
         return urls.distinct()
     }
 
+    private fun trySpotify(track: Track): List<String> {
+        val token = get("https://open.spotify.com/get_access_token?reason=transport&productType=web_player")
+            ?.let { runCatching { JSONObject(it).getString("accessToken") }.getOrNull() } ?: return emptyList()
+        val auth = mapOf("Authorization" to "Bearer $token")
+        val title = clean(track.title).substringBefore("(").trim()
+        val album = clean(track.album)
+        val artist = clean(firstArtist(track.artist))
+        val queries = listOfNotNull(
+            "track:$title artist:$artist".takeIf { title.isNotBlank() && artist.isNotBlank() },
+            "album:$album artist:$artist".takeIf { album.isNotBlank() && artist.isNotBlank() },
+            "album:$album".takeIf { album.isNotBlank() },
+            "$artist $title".takeIf { title.isNotBlank() && artist.isNotBlank() },
+        ).distinct()
+        for (q in queries) {
+            val urls = runCatching { spotifySearchCanvas(q, auth) }.getOrElse { emptyList() }
+            if (urls.isNotEmpty()) return urls
+        }
+        return emptyList()
+    }
+
+    // --- public entry ---------------------------------------------------------
+
     /** Direct mp4 URLs for the selected source. Auto = Echo -> Apple -> Convx -> Spotify (as in Musify's Auto). */
     fun findUrls(context: Context, track: Track): List<String> {
-        val title = track.title.substringBefore("(").trim()
-        val artist = track.artist.substringBefore(",").substringBefore("/").trim()
         return when (CanvasPrefs.source(context)) {
-            "echo" -> queryEcho(title, artist)
-            "apple" -> queryApple(track.album, artist)
-            "convx" -> queryConvx(title, artist)
-            "spotify" -> querySpotify(title, artist)
-            else -> queryEcho(title, artist)
-                .ifEmpty { queryApple(track.album, artist) }
-                .ifEmpty { queryConvx(title, artist) }
-                .ifEmpty { querySpotify(title, artist) }
+            "echo" -> tryQueries(track, ::queryEcho)
+            "apple" -> tryApple(track)
+            "convx" -> tryQueries(track, ::queryConvx)
+            "spotify" -> trySpotify(track)
+            else -> tryQueries(track, ::queryEcho)
+                .ifEmpty { tryApple(track) }
+                .ifEmpty { tryQueries(track, ::queryConvx) }
+                .ifEmpty { trySpotify(track) }
         }
     }
 
@@ -172,10 +245,10 @@ object CanvasFinder {
 suspend fun fetchCanvasVideo(context: Context, track: Track, status: MutableState<String?>): FetchOutcome =
     withContext(Dispatchers.IO) {
         if (!CanvasPrefs.canTry(context, track.id)) return@withContext FetchOutcome.NotFound
-        status.value = "Looking for a canvas\u2026"
+        status.value = "Looking for a canvas…"
         val urls = runCatching { CanvasFinder.findUrls(context, track) }.getOrElse { emptyList() }
         if (urls.isEmpty()) { CanvasPrefs.markMissed(context, track.id); return@withContext FetchOutcome.NotFound }
-        status.value = "Downloading canvas\u2026"
+        status.value = "Downloading canvas…"
         val out = Store.appFile(context, track, false)
         if (urls.any { CanvasFinder.download(it, out) }) {
             CanvasPrefs.clear(context, track.id)
@@ -185,3 +258,4 @@ suspend fun fetchCanvasVideo(context: Context, track: Track, status: MutableStat
             FetchOutcome.Failed("Canvas download failed")
         }
     }
+    
