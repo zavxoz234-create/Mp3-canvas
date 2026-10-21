@@ -852,7 +852,7 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
 @Composable private fun PlayerScreen(track: Track, queueTracks: List<Track>, player: Player, playing: Boolean, shuffle: Boolean, refresh: Int, ytDlpReady: Boolean?, ytDlpInitError: String?, folderTree: String?, rootFolder: String?, onBack: () -> Unit, onShuffle: () -> Unit, onYtDlpInit: (Boolean, String?) -> Unit, onTrim: (Uri, Boolean) -> Unit, onChanged: () -> Unit, onEditTrack: () -> Unit) {
     val ctx = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var lyricsMode by remember { mutableStateOf(false) }; var menu by remember { mutableStateOf(false) }; var pendingLyrics by remember { mutableStateOf(false) }; val pos = remember(track.id) { mutableLongStateOf(0L) }
+    var lyricsMode by remember { mutableStateOf(false) }; var menu by remember { mutableStateOf(false) }; var pendingLyrics by remember { mutableStateOf(false) }; var canvasSettings by remember { mutableStateOf(false) }; val pos = remember(track.id) { mutableLongStateOf(0L) }
     val syncPrefs = remember { ctx.getSharedPreferences("video_sync", 0) }
     var videoOffset by remember(track.id) { mutableLongStateOf(syncPrefs.getLong("offset_${track.id}", 0L)) }
     var syncDialog by remember { mutableStateOf(false) }
@@ -890,6 +890,10 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
         if (!VideoPrefs.canTry(ctx, track.id) || !VideoFinder.networkAllowed(ctx)) return@LaunchedEffect
         delay(2_000) // the user may just be skipping through the queue
         try {
+            // Canvas first: cheap HTTP lookup + small file. yt-dlp official video only as fallback.
+            if (CanvasPrefs.enabled(ctx) && fetchCanvasVideo(ctx, track, autoStatus) is FetchOutcome.Saved) {
+                onChanged(); return@LaunchedEffect
+            }
             if (fetchOfficialVideo(ctx, track, autoStatus) is FetchOutcome.Saved) onChanged()
         } finally { autoStatus.value = null }
     }
@@ -952,6 +956,18 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
                     } })
                     DropdownMenuItem(text = { Text(if (autoFindEnabled) "Auto-find official videos: on" else "Auto-find official videos: off") }, onClick = { menu = false; autoFindEnabled = !autoFindEnabled; VideoPrefs.setAutoEnabled(ctx, autoFindEnabled) })
                     DropdownMenuItem(text = { Text(if (wifiOnly) "Auto-download on Wi-Fi only: on" else "Auto-download on Wi-Fi only: off") }, onClick = { menu = false; wifiOnly = !wifiOnly; VideoPrefs.setWifiOnly(ctx, wifiOnly) })
+                    DropdownMenuItem(text = { Text("Find canvas now") }, onClick = { menu = false; scope.launch {
+                        if (!VideoFinder.networkAllowed(ctx, ignoreWifiOnly = true)) { Toast.makeText(ctx, "No internet connection", Toast.LENGTH_LONG).show(); return@launch }
+                        CanvasPrefs.clear(ctx, track.id)
+                        val outcome = try { fetchCanvasVideo(ctx, track, autoStatus) } finally { autoStatus.value = null }
+                        when (outcome) {
+                            is FetchOutcome.Saved -> { onChanged(); Toast.makeText(ctx, "Canvas added for ${track.title}", Toast.LENGTH_LONG).show() }
+                            is FetchOutcome.NotFound -> Toast.makeText(ctx, "No canvas found for ${track.title}", Toast.LENGTH_LONG).show()
+                            is FetchOutcome.Busy -> Toast.makeText(ctx, "Another download is still running", Toast.LENGTH_LONG).show()
+                            is FetchOutcome.Failed -> Toast.makeText(ctx, "Canvas failed: ${outcome.message}", Toast.LENGTH_LONG).show()
+                        }
+                    } })
+                    DropdownMenuItem(text = { Text("Canvas source…") }, onClick = { menu = false; canvasSettings = true })
                     DropdownMenuItem(text = { Text("Choose video file") }, onClick = { menu = false; pendingLyrics = false; pickVideo.launch("video/*") })
                     DropdownMenuItem(text = { Text("Choose lyrics video") }, onClick = { menu = false; pendingLyrics = true; pickVideo.launch("video/*") })
                     DropdownMenuItem(text = { Text("Download video with yt-dlp") }, onClick = { menu = false; downloadUrl = ""; variants = emptyList(); selectedVariant = null; downloadDialog = true })
@@ -1036,6 +1052,7 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
             }
         } }, confirmButton = { TextButton(onClick = { syncPrefs.edit().putLong("offset_${track.id}", videoOffset).apply(); syncDialog = false }) { Text("Save") } },
         dismissButton = { TextButton(onClick = { videoOffset = 0L; syncPrefs.edit().remove("offset_${track.id}").apply(); syncDialog = false }) { Text("Reset") } })
+    if (canvasSettings) CanvasSettingsDialog { canvasSettings = false }
     if (downloadDialog) AlertDialog(
         onDismissRequest = { if (!downloading) downloadDialog = false },
         title = { Text("Download a companion video") },
@@ -1358,4 +1375,32 @@ private fun splitArtists(value: String): List<String> {
             }
         }
     }
+}
+
+/** Canvas settings: enable toggle + source picker (Auto / Echo Music / Apple Music / Convx / Spotify). */
+@Composable private fun CanvasSettingsDialog(onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    var enabled by remember { mutableStateOf(CanvasPrefs.enabled(ctx)) }
+    var source by remember { mutableStateOf(CanvasPrefs.source(ctx)) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Canvas") },
+        text = {
+            Column {
+                Text("Replaces the static album art in the player with a short looping video when one is available for the current song.", color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
+                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Use canvas", Modifier.weight(1f))
+                    Switch(checked = enabled, onCheckedChange = { enabled = it; CanvasPrefs.setEnabled(ctx, it) })
+                }
+                Text("Canvas source", style = MaterialTheme.typography.labelMedium, color = LocalAccent.current)
+                CanvasPrefs.sources.forEach { s ->
+                    Row(Modifier.fillMaxWidth().clickable { source = s; CanvasPrefs.setSource(ctx, s) }, verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = source == s, onClick = { source = s; CanvasPrefs.setSource(ctx, s) })
+                        Text(CanvasPrefs.label(s))
+                    }
+                }
+                Text("Auto tries Echo Music first, then falls back to Apple Music, Convx, and Spotify. Spotify needs no account but is the slowest source.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
 }
