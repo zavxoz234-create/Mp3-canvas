@@ -10,8 +10,6 @@ import java.math.BigInteger
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.text.Normalizer
-import java.util.Locale
 
 /** Settings for the automatic canvas feature and the selected source. */
 object CanvasPrefs {
@@ -127,7 +125,7 @@ object CanvasFinder {
         return urls.distinct()
     }
 
-    /** Direct mp4 URLs for the selected source. Auto = Echo → Apple → Convx → Spotify (as in Musify's Auto). */
+    /** Direct mp4 URLs for the selected source. Auto = Echo -> Apple -> Convx -> Spotify (as in Musify's Auto). */
     fun findUrls(context: Context, track: Track): List<String> {
         val title = track.title.substringBefore("(").trim()
         val artist = track.artist.substringBefore(",").substringBefore("/").trim()
@@ -174,10 +172,10 @@ object CanvasFinder {
 suspend fun fetchCanvasVideo(context: Context, track: Track, status: MutableState<String?>): FetchOutcome =
     withContext(Dispatchers.IO) {
         if (!CanvasPrefs.canTry(context, track.id)) return@withContext FetchOutcome.NotFound
-        status.value = "Looking for a canvas…"
+        status.value = "Looking for a canvas\u2026"
         val urls = runCatching { CanvasFinder.findUrls(context, track) }.getOrElse { emptyList() }
         if (urls.isEmpty()) { CanvasPrefs.markMissed(context, track.id); return@withContext FetchOutcome.NotFound }
-        status.value = "Downloading canvas…"
+        status.value = "Downloading canvas\u2026"
         val out = Store.appFile(context, track, false)
         if (urls.any { CanvasFinder.download(it, out) }) {
             CanvasPrefs.clear(context, track.id)
