@@ -98,16 +98,15 @@ private class CropTextureView(context: Context) : TextureView(context) {
     private fun applyCrop() {
         val w = width.toFloat(); val h = height.toFloat()
         if (videoW <= 0 || videoH <= 0 || w <= 0f || h <= 0f) return
-        val videoAspect = videoW.toFloat() / videoH
-        val viewAspect = w / h
+        // Fit the whole video inside the view, centered — never crop, never stretch.
+        val scale = minOf(w / videoW, h / videoH)
         val m = Matrix()
-        if (videoAspect > viewAspect) m.setScale(videoAspect / viewAspect, 1f, w / 2f, h / 2f)
-        else m.setScale(1f, viewAspect / videoAspect, w / 2f, h / 2f)
+        m.setScale(scale, scale)
+        m.postTranslate((w - videoW * scale) / 2f, (h - videoH * scale) / 2f)
         setTransform(m)
     }
-}
 
-/** Keeps the muted video within [toleranceMs] of the audio position (wrapping at the loop point). */
+/** Keeps the muted video within [toleranceMs] of the audio position (wrapping at the loop point). */. 
 private fun syncVideo(video: ExoPlayer, audio: Player, offsetMs: Long, toleranceMs: Long) {
     val duration = video.duration
     if (duration <= 0 || duration == C.TIME_UNSET) return
