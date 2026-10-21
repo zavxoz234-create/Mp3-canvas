@@ -79,7 +79,7 @@ fun ArtBox(videoUri: Uri?, audio: Player, offsetMs: Long = 0L, modifier: Modifie
 /**
  * Renders into a TextureView instead of PlayerView's default SurfaceView. A SurfaceView ignores Compose's
  * rounded clip, alpha and translation, which is what made the artwork animations glitch while video played.
- * The view centre-crops the video itself so portrait or wide clips fill the square.
+ * The view fits the whole video centred, so portrait canvases are not cropped or stretched.
  */
 private class CropTextureView(context: Context) : TextureView(context) {
     private var videoW = 0
@@ -98,15 +98,16 @@ private class CropTextureView(context: Context) : TextureView(context) {
     private fun applyCrop() {
         val w = width.toFloat(); val h = height.toFloat()
         if (videoW <= 0 || videoH <= 0 || w <= 0f || h <= 0f) return
-        // Fit the whole video inside the view, centered — never crop, never stretch.
+        // Fit the whole video inside the view, centred — never cropped, never stretched.
         val scale = minOf(w / videoW, h / videoH)
         val m = Matrix()
         m.setScale(scale, scale)
         m.postTranslate((w - videoW * scale) / 2f, (h - videoH * scale) / 2f)
         setTransform(m)
     }
+}
 
-/** Keeps the muted video within [toleranceMs] of the audio position (wrapping at the loop point). */. 
+/** Keeps the muted video within [toleranceMs] of the audio position (wrapping at the loop point). */
 private fun syncVideo(video: ExoPlayer, audio: Player, offsetMs: Long, toleranceMs: Long) {
     val duration = video.duration
     if (duration <= 0 || duration == C.TIME_UNSET) return
