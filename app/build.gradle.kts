@@ -10,8 +10,8 @@ android {
         applicationId = "com.example.canvasplayer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.8.0"
+        versionCode = 15
+        versionName = "0.8.2"
     }
     splits {
         abi {
@@ -31,6 +31,7 @@ android {
 dependencies {
     val media3 = "1.4.1"
     implementation("androidx.media3:media3-exoplayer:$media3")
+    implementation("androidx.media3:media3-exoplayer-hls:$media3") // canvas streams are HLS (.m3u8)
     implementation("androidx.media3:media3-session:$media3")
     implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.media3:media3-transformer:$media3")
