@@ -149,6 +149,16 @@ class MainActivity : ComponentActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Crash reporter: remember the last fatal error so it can be shown (and screenshotted) on next launch.
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            runCatching {
+                getSharedPreferences("crashlog", MODE_PRIVATE).edit()
+                    .putString("trace", "${'$'}{error.javaClass.simpleName}: ${'$'}{error.message}\n" + error.stackTraceToString())
+                    .commit()
+            }
+            previousHandler?.uncaughtException(thread, error)
+        }
         val token = SessionToken(this, ComponentName(this, PlaybackService::class.java))
         val future = MediaController.Builder(this, token).buildAsync()
         future.addListener({ controller = future.get() }, ContextCompat.getMainExecutor(this))
@@ -176,6 +186,17 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
 }
 
 @Composable private fun App(tracks: List<Track>, player: Player?, onFolderChange: (String?) -> Unit, onLibraryEdited: (TrackEdit) -> Unit) {
+    // Show the last crash, once, so it can be reported.
+    val crashPrefs = LocalContext.current.getSharedPreferences("crashlog", android.content.Context.MODE_PRIVATE)
+    var crashTrace by remember { mutableStateOf(crashPrefs.getString("trace", null)?.also { crashPrefs.edit().remove("trace").apply() }) }
+    crashTrace?.let { trace ->
+        AlertDialog(
+            onDismissRequest = { crashTrace = null },
+            title = { Text("Crash report") },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) { Text(trace, style = MaterialTheme.typography.bodySmall) } },
+            confirmButton = { TextButton(onClick = { crashTrace = null }) { Text("Close") } }
+        )
+    }
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("library", 0) }
     var folder by remember { mutableStateOf(prefs.getString("folder", null)) }
