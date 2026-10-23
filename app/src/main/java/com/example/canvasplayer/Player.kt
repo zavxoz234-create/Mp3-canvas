@@ -157,8 +157,10 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
 
     // Only the media item is (re)prepared here. Changing the sync offset must NOT restart the decoder.
     LaunchedEffect(uri) {
-        vp.setMediaItem(MediaItem.fromUri(uri))
-        vp.prepare()
+        runCatching {
+            vp.setMediaItem(MediaItem.fromUri(uri))
+            vp.prepare()
+        } // a missing decoder/module must leave album art, never crash the screen
         vp.playWhenReady = audio.isPlaying
         while (true) { // slow drift correction; seeking too eagerly causes visible stutter
             delay(2_000)

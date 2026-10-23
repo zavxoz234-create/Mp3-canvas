@@ -154,7 +154,7 @@ class MainActivity : ComponentActivity() {
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             runCatching {
                 getSharedPreferences("crashlog", MODE_PRIVATE).edit()
-                    .putString("trace", "${'$'}{error.javaClass.simpleName}: ${'$'}{error.message}\n" + error.stackTraceToString())
+                    .putString("trace", error.javaClass.simpleName + ": " + error.message + "\n" + error.stackTraceToString())
                     .commit()
             }
             previousHandler?.uncaughtException(thread, error)
