@@ -1,9 +1,11 @@
 package com.example.canvasplayer
 
 import android.content.Context
+import android.net.Uri
 import androidx.compose.runtime.MutableState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.math.BigInteger
@@ -11,19 +13,25 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
-/** Settings for the automatic canvas feature and the selected source. */
+/**
+ * Settings for the automatic canvas feature and the selected source.
+ *
+ * Live status of the sources (verified 2026-10): the Apple Music source works and returns
+ * HLS (.m3u8) streams; Echo Music and Convx appear to be offline and stay in the chain only as
+ * harmless fallbacks; Spotify uses the anonymous web-player token flow.
+ */
 object CanvasPrefs {
     private const val HOUR = 3_600_000L
     private const val DAY = 24 * HOUR
     private fun p(c: Context) = c.getSharedPreferences("canvas", Context.MODE_PRIVATE)
 
     const val AUTO = "auto"
-    val sources = listOf(AUTO, "echo", "apple", "convx", "spotify")
+    val sources = listOf(AUTO, "apple", "spotify", "echo", "convx")
     fun label(source: String) = when (source) {
-        "echo" -> "Echo Music"
         "apple" -> "Apple Music"
-        "convx" -> "Convx"
         "spotify" -> "Spotify"
+        "echo" -> "Echo Music"
+        "convx" -> "Convx"
         else -> "Auto"
     }
 
@@ -40,11 +48,16 @@ object CanvasPrefs {
     fun clear(c: Context, trackId: Long) = p(c).edit().remove(retryKey(trackId)).apply()
 }
 
+/** Remembers streamed (HLS) canvas URLs per track — those play directly from the network instead of a local file. */
+object CanvasUrlStore {
+    private fun p(c: Context) = c.getSharedPreferences("canvas_urls", Context.MODE_PRIVATE)
+    fun get(c: Context, trackId: Long): String? = p(c).getString("u$trackId", null)
+    fun put(c: Context, trackId: Long, url: String) = p(c).edit().putString("u$trackId", url).apply()
+    fun remove(c: Context, trackId: Long) = p(c).edit().remove("u$trackId").apply()
+}
+
 /**
- * Queries the canvas databases and downloads the mp4 into the track's companion-video slot.
- *
- * Lookups are multi-strategy because tag quality varies: the same song may be indexed under a
- * clean title, a remastered title, or just its album. Each provider is tried with
+ * Queries the canvas databases for a track. Each provider is tried with
  * title+artist, then album+artist, then title alone, then album alone — first hit wins.
  */
 object CanvasFinder {
@@ -54,6 +67,7 @@ object CanvasFinder {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8_000; readTimeout = 8_000
             setRequestProperty("User-Agent", "CanvasPlayer/0.8.1")
+            setRequestProperty("Accept", "*/*")
             headers.forEach { (k, v) -> setRequestProperty(k, v) }
         }
         return try {
@@ -62,16 +76,16 @@ object CanvasFinder {
         } catch (_: Exception) { null } finally { conn.disconnect() }
     }
 
-    /** Walks any JSON shape and keeps values that look like canvas video URLs. */
+    /** Walks any JSON shape and keeps values that look like canvas video URLs (mp4 or HLS). */
     private fun collectUrls(node: Any?, out: MutableList<String>) {
         when (node) {
             is JSONObject -> node.keys().forEach { key ->
                 val value = node.opt(key)
                 if (value is String && (key.contains("url", true) || key.contains("uri", true)) &&
-                    (value.endsWith(".mp4", true) || value.contains("canvas", true))) out += value
+                    (value.endsWith(".mp4", true) || value.contains(".m3u8", true) || value.contains("canvas", true))) out += value
                 else collectUrls(value, out)
             }
-            is org.json.JSONArray -> for (i in 0 until node.length()) collectUrls(node.opt(i), out)
+            is JSONArray -> for (i in 0 until node.length()) collectUrls(node.opt(i), out)
         }
     }
 
@@ -89,7 +103,8 @@ object CanvasFinder {
         v = v.replace(Regex("(?i)\\(feat\\.?[^)]*\\)"), "")
         v = v.replace(Regex("(?i)\\(with [^)]*\\)"), "")
         v = v.replace(Regex("(?i)\\[(feat|with|remaster(?:ed)?|live|acoustic|instrumental|radio|edit|single|version|bonus|deluxe|explicit|clean)[^]]*\\]"), "")
-        v = v.replace(Regex("(?i)\\s*[-–—]\\s*(remaster(?:ed)?|live|acoustic|instrumental|radio|edit|single|version|bonus|deluxe).*"), "")
+        v = v.replace(Regex("(?i)\\s*[-\u2013\u2014]\\s*(remaster(?:ed)?|live|acoustic|instrumental|radio|edit|single|version|bonus|deluxe).*"), "")
+        v = v.replace(Regex("(?i)\\s*[\\[({]?(disc|cd|disk)\\s*\\d+[\\])}]?.*$"), "")
         return v.replace(Regex("\\s+"), " ").trim()
     }
 
@@ -129,12 +144,24 @@ object CanvasFinder {
         return urlsFromJson(body)
     }
 
-    // Verified public API (github.com/m8tec/apple-music-animated-artworks). HLS-only results are
-    // skipped because companion videos must be local mp4 files.
+    // Verified working public API (github.com/m8tec/apple-music-animated-artworks).
+    // It returns HLS streams: "url" (square, fits the artwork frame) then "url_tall".
     private fun queryApple(album: String, artist: String): List<String> {
         if (album.isBlank()) return emptyList()
         val body = get("https://artwork.m8tec.top/api/v1/artwork/search?artist=${enc(artist)}&album=${enc(album)}") ?: return emptyList()
-        return urlsFromJson(body).filter { it.endsWith(".mp4", true) }
+        val out = mutableListOf<String>()
+        fun fromObject(o: JSONObject) {
+            o.optString("url_tall").takeIf { it.isNotBlank() }?.let(out::add) // 9:16 portrait first
+            o.optString("url").takeIf { it.isNotBlank() }?.let(out::add)
+        }
+        runCatching {
+            val trimmed = body.trim()
+            when {
+                trimmed.startsWith("[") -> { val arr = JSONArray(trimmed); for (i in 0 until arr.length()) fromObject(arr.getJSONObject(i)) }
+                else -> fromObject(JSONObject(trimmed))
+            }
+        }
+        return out.distinct()
     }
 
     private fun tryApple(track: Track): List<String> {
@@ -200,15 +227,15 @@ object CanvasFinder {
 
     // --- public entry ---------------------------------------------------------
 
-    /** Direct mp4 URLs for the selected source. Auto = Echo -> Apple -> Convx -> Spotify (as in Musify's Auto). */
+    /** Direct video URLs for the selected source. Auto = Apple -> Echo -> Convx -> Spotify. */
     fun findUrls(context: Context, track: Track): List<String> {
         return when (CanvasPrefs.source(context)) {
-            "echo" -> tryQueries(track, ::queryEcho)
             "apple" -> tryApple(track)
-            "convx" -> tryQueries(track, ::queryConvx)
             "spotify" -> trySpotify(track)
-            else -> tryQueries(track, ::queryEcho)
-                .ifEmpty { tryApple(track) }
+            "echo" -> tryQueries(track, ::queryEcho)
+            "convx" -> tryQueries(track, ::queryConvx)
+            else -> tryApple(track)
+                .ifEmpty { tryQueries(track, ::queryEcho) }
                 .ifEmpty { tryQueries(track, ::queryConvx) }
                 .ifEmpty { trySpotify(track) }
         }
@@ -241,21 +268,35 @@ object CanvasFinder {
     }
 }
 
-/** Looks the track up on the selected canvas source and stores the mp4 as its companion video. */
+/**
+ * Looks the track up on the selected canvas source.
+ * mp4 URLs are downloaded and stored as the companion video (works offline);
+ * HLS (.m3u8) URLs are remembered and streamed directly by the player.
+ */
 suspend fun fetchCanvasVideo(context: Context, track: Track, status: MutableState<String?>): FetchOutcome =
     withContext(Dispatchers.IO) {
         if (!CanvasPrefs.canTry(context, track.id)) return@withContext FetchOutcome.NotFound
         status.value = "Looking for a canvas…"
         val urls = runCatching { CanvasFinder.findUrls(context, track) }.getOrElse { emptyList() }
         if (urls.isEmpty()) { CanvasPrefs.markMissed(context, track.id); return@withContext FetchOutcome.NotFound }
-        status.value = "Downloading canvas…"
-        val out = Store.appFile(context, track, false)
-        if (urls.any { CanvasFinder.download(it, out) }) {
-            CanvasPrefs.clear(context, track.id)
-            FetchOutcome.Saved
-        } else {
+        val mp4 = urls.firstOrNull { it.endsWith(".mp4", true) }
+        if (mp4 != null) {
+            status.value = "Downloading canvas…"
+            val out = Store.appFile(context, track, false)
+            if (CanvasFinder.download(mp4, out)) {
+                CanvasUrlStore.remove(context, track.id)
+                CanvasPrefs.clear(context, track.id)
+                return@withContext FetchOutcome.Saved
+            }
             CanvasPrefs.markFailed(context, track.id)
-            FetchOutcome.Failed("Canvas download failed")
+            return@withContext FetchOutcome.Failed("Canvas download failed")
         }
+        val stream = urls.firstOrNull { it.contains(".m3u8", true) }
+        if (stream != null) {
+            CanvasUrlStore.put(context, track.id, stream)
+            CanvasPrefs.clear(context, track.id)
+            return@withContext FetchOutcome.Saved
+        }
+        CanvasPrefs.markMissed(context, track.id)
+        FetchOutcome.NotFound
     }
-    

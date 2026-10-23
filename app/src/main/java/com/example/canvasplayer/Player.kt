@@ -1,12 +1,12 @@
 package com.example.canvasplayer
 
 import android.content.Context
-import android.graphics.Matrix
 import android.net.Uri
 import android.view.TextureView
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -77,49 +77,10 @@ fun ArtBox(videoUri: Uri?, audio: Player, offsetMs: Long = 0L, modifier: Modifie
 }
 
 /**
- * TextureView that fits the whole video centred — never cropped, never stretched — and applies
- * the video's own rotation metadata (vertical canvases are usually tagged 90/270 degrees).
+ * Renders into a TextureView instead of PlayerView's default SurfaceView. A SurfaceView ignores Compose's
+ * rounded clip, alpha and translation, which is what made the artwork animations glitch while video played.
+ * The view fits the whole video centred, so portrait canvases are not cropped or stretched.
  */
-private class CropTextureView(context: Context) : TextureView(context) {
-    private var videoW = 0
-    private var videoH = 0
-    private var rotationDeg = 0
-
-    fun setVideoSize(size: VideoSize) {
-        videoW = (size.width * size.pixelWidthHeightRatio).toInt()
-        videoH = size.height
-        rotationDeg = size.unappliedRotationDegrees
-        applyCrop()
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        applyCrop()
-    }
-
-    override fun onAttachedToWindow() {
-        super.onAttachedToWindow()
-        applyCrop()
-    }
-
-    private fun applyCrop() {
-        val w = width.toFloat(); val h = height.toFloat()
-        if (videoW <= 0 || videoH <= 0 || w <= 0f || h <= 0f) return
-        // TextureView content is not rotated by ExoPlayer: swap dimensions for 90/270 so the
-        // fit math uses the orientation the viewer actually sees.
-        val rotated = rotationDeg == 90 || rotationDeg == 270
-        val effW = if (rotated) videoH else videoW
-        val effH = if (rotated) videoW else videoH
-        // Fit the WHOLE video inside the view, centred — never cropped, never stretched.
-        val scale = minOf(w / effW, h / effH)
-        val m = Matrix()
-        m.setScale(scale, scale)
-        m.postTranslate((w - videoW * scale) / 2f, (h - videoH * scale) / 2f)
-        if (rotationDeg != 0) m.postRotate(rotationDeg.toFloat(), w / 2f, h / 2f)
-        setTransform(m)
-    }
-}
-
 /** Keeps the muted video within [toleranceMs] of the audio position (wrapping at the loop point). */
 private fun syncVideo(video: ExoPlayer, audio: Player, offsetMs: Long, toleranceMs: Long) {
     val duration = video.duration
@@ -134,6 +95,9 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
     val ctx = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val firstFrameCallback by rememberUpdatedState(onFirstFrame)
+    // Display aspect of the incoming frames (rotation-aware). Sizing the view to this makes the
+    // video fit perfectly with no reliance on transform matrices at all.
+    var videoAspect by remember(uri) { mutableStateOf(0f) }
     val offset by rememberUpdatedState(offsetMs)
     val vp = remember {
         ExoPlayer.Builder(ctx).build().apply {
@@ -147,7 +111,7 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
                 .build()
         }
     }
-    val texture = remember { CropTextureView(ctx).also { vp.setVideoTextureView(it) } }
+    val texture = remember { TextureView(ctx).also { vp.setVideoTextureView(it) } }
 
     // Declared first so it is disposed last: listeners are removed before the player is released.
     DisposableEffect(vp) { onDispose { vp.release() } }
@@ -156,7 +120,10 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
         val l = object : Player.Listener {
             override fun onRenderedFirstFrame() { firstFrameCallback() }
             override fun onVideoSizeChanged(videoSize: VideoSize) {
-                texture.setVideoSize(videoSize)
+                val rotated = videoSize.unappliedRotationDegrees == 90 || videoSize.unappliedRotationDegrees == 270
+                val w = videoSize.width * videoSize.pixelWidthHeightRatio
+                val h = videoSize.height.toFloat()
+                if (h > 0f) videoAspect = if (rotated) h / w else w / h
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) syncVideo(vp, audio, offset, 300)
@@ -206,5 +173,13 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
         onDispose { lifecycle.removeObserver(obs) }
     }
 
-    AndroidView(factory = { texture }, modifier = modifier)
+    // Box centers the view; aspectRatio sizes it to the video so it always fits whole — never cropped.
+    Box(modifier, contentAlignment = Alignment.Center) {
+        AndroidView(
+            factory = { texture },
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (videoAspect > 0f) Modifier.aspectRatio(videoAspect, matchHeightConstraintsFirst = true) else Modifier)
+        )
+    }
 }

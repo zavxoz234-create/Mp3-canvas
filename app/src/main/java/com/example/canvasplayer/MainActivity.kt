@@ -4,6 +4,7 @@ import android.Manifest
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -186,6 +187,9 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     var inPlayer by remember { mutableStateOf(false) }
     var returnToCurrentTrack by remember { mutableIntStateOf(0) }
     val librarySongListState = rememberLazyListState()
+    // Hoisted so the selected tab + artist/album survive navigation to the player and back.
+    val librarySection = remember { mutableStateOf("Songs") }
+    val libraryGroup = remember { mutableStateOf<String?>(null) }
     var currentId by remember { mutableStateOf<String?>(null) }
     var playing by remember { mutableStateOf(false) }
     var shuffle by remember { mutableStateOf(false) }
@@ -376,7 +380,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
                             else Toast.makeText(ctx, "Could not save tags: ${saved.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                         }
                     }
-                }, returnToCurrentTrack = returnToCurrentTrack, songListState = librarySongListState)
+                }, returnToCurrentTrack = returnToCurrentTrack, songListState = librarySongListState, sectionState = librarySection, groupState = libraryGroup)
         }
     }
     editDialogTrack?.let { item -> EditTrackDialog(item, tracks.count { it.belongsToSameAlbum(item) }, onDismiss = { editDialogTrack = null }) { edit ->
@@ -404,14 +408,23 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
     } }
 }
 
-@Composable private fun LibraryScreen(tracks: List<Track>, current: Track?, playing: Boolean, folder: String?, onChooseFolder: () -> Unit, onRefreshScan: () -> Unit, refreshingFolderScan: Boolean, onClearFolder: () -> Unit, onShuffle: () -> Unit, onPlay: (Track) -> Unit, onMiniOpen: () -> Unit, onMiniPlay: () -> Unit, onEdit: (TrackEdit) -> Unit, onExportBackup: () -> Unit, onImportBackup: () -> Unit, returnToCurrentTrack: Int, songListState: LazyListState) {
+@Composable private fun LibraryScreen(tracks: List<Track>, current: Track?, playing: Boolean, folder: String?, onChooseFolder: () -> Unit, onRefreshScan: () -> Unit, refreshingFolderScan: Boolean, onClearFolder: () -> Unit, onShuffle: () -> Unit, onPlay: (Track) -> Unit, onMiniOpen: () -> Unit, onMiniPlay: () -> Unit, onEdit: (TrackEdit) -> Unit, onExportBackup: () -> Unit, onImportBackup: () -> Unit, returnToCurrentTrack: Int, songListState: LazyListState, sectionState: MutableState<String>, groupState: MutableState<String?>) {
     var search by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
     var edit by remember { mutableStateOf<Track?>(null) }
-    var section by remember { mutableStateOf("Songs") }
-    var selectedGroup by remember { mutableStateOf<String?>(null) }
+    var section by sectionState
+    var sortBy by remember { mutableStateOf("Default") }
+    var sortMenu by remember { mutableStateOf(false) }
+    var selectedGroup by groupState
     var listMenu by remember { mutableStateOf(false) }
     val shown = remember(tracks, search) { tracks.filter { it.title.contains(search, true) || it.artist.contains(search, true) || it.album.contains(search, true) || it.albumArtist.contains(search, true) } }
+    fun sorted(list: List<Track>) = when (sortBy) {
+        "Title" -> list.sortedBy { it.title.lowercase(Locale.ROOT) }
+        "Artist" -> list.sortedWith(compareBy({ it.artist.lowercase(Locale.ROOT) }, { it.title.lowercase(Locale.ROOT) }))
+        "Album" -> list.sortedWith(compareBy({ it.album.lowercase(Locale.ROOT) }, { it.title.lowercase(Locale.ROOT) }))
+        "Duration" -> list.sortedBy { it.durationMs }
+        else -> list
+    }
     val artists = remember(tracks) {
         tracks.flatMap { track -> splitArtists(track.artist).ifEmpty { listOf("Unknown artist") }.map { it to track } }
             .groupBy({ it.first.trim().lowercase(Locale.ROOT) }, { it })
@@ -449,6 +462,12 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) { Text(groupTitle.uppercase(), style = MaterialTheme.typography.labelMedium, color = LocalAccent.current); Text(if (selectedGroup != null) "$groupCount tracks" else when(section) { "Artists" -> "${artists.size} artists"; "Albums" -> "${albums.size} albums"; else -> "${shown.size} tracks" }, style = MaterialTheme.typography.titleLarge) }
+            Box {
+                TextButton(onClick = { sortMenu = true }) { Text("Sort: $sortBy", color = LocalAccent.current) }
+                DropdownMenu(sortMenu, { sortMenu = false }) {
+                    listOf("Default", "Title", "Artist", "Album", "Duration").forEach { s -> DropdownMenuItem(text = { Text(s) }, onClick = { sortBy = s; sortMenu = false }) }
+                }
+            }
             IconButton(onClick = onShuffle, enabled = tracks.isNotEmpty()) { Icon(Icons.Default.Shuffle, "Shuffle songs", tint = LocalAccent.current) }
         }
         val groupTracks = when {
@@ -456,7 +475,7 @@ private fun artworkTargets(edit: TrackEdit, allTracks: List<Track>): List<Track>
             section == "Albums" && selectedGroup != null -> albums[selectedGroup].orEmpty()
             else -> emptyList()
         }
-        val songRows = if (selectedGroup != null) groupTracks.filter { it.title.contains(search, true) } else shown
+        val songRows = sorted(if (selectedGroup != null) groupTracks.filter { it.title.contains(search, true) } else shown)
      LaunchedEffect(returnToCurrentTrack) {
     if (returnToCurrentTrack > 0 && current != null) {
         val rowIndex = songRows.indexOfFirst { it.id == current.id }
@@ -868,7 +887,7 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
     val scope = rememberCoroutineScope()
     // Tagged with the track id so the previous track's video is never shown for the next track.
     val visualsState by produceState<Triple<Long, Uri?, Uri?>?>(null, track.id, refresh) {
-        value = withContext(Dispatchers.IO) { Triple(track.id, Store.find(ctx, track, false), Store.find(ctx, track, true)) }
+        value = withContext(Dispatchers.IO) { Triple(track.id, Store.find(ctx, track, false) ?: CanvasUrlStore.get(ctx, track.id)?.let(Uri::parse), Store.find(ctx, track, true)) }
     }
     val visuals = visualsState?.takeIf { it.first == track.id }
     // Only leaf composables (slider, time labels, lyrics) read `pos`; the screen itself does not recompose on every tick.
@@ -971,18 +990,21 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
                     DropdownMenuItem(text = { Text("Choose video file") }, onClick = { menu = false; pendingLyrics = false; pickVideo.launch("video/*") })
                     DropdownMenuItem(text = { Text("Choose lyrics video") }, onClick = { menu = false; pendingLyrics = true; pickVideo.launch("video/*") })
                     DropdownMenuItem(text = { Text("Download video with yt-dlp") }, onClick = { menu = false; downloadUrl = ""; variants = emptyList(); selectedVariant = null; downloadDialog = true })
-                    DropdownMenuItem(text = { Text("Remove companion videos") }, onClick = { menu = false; Store.appFile(ctx, track, false).delete(); Store.appFile(ctx, track, true).delete(); VideoPrefs.markRemoved(ctx, track.id); onChanged() })
+                    DropdownMenuItem(text = { Text("Remove companion videos") }, onClick = { menu = false; Store.appFile(ctx, track, false).delete(); Store.appFile(ctx, track, true).delete(); CanvasUrlStore.remove(ctx, track.id); VideoPrefs.markRemoved(ctx, track.id); onChanged() })
                 }
             }
         }
         Spacer(Modifier.weight(.4f))
+        // Streamed canvases are 9:16 portrait: morph the frame to tall for them; art and downloaded videos stay square.
+        val streamedCanvas = video != null && video.toString().startsWith("http")
+        val artAspect by animateFloatAsState(if (streamedCanvas) 9f / 16f else 1f, animationSpec = tween(350), label = "artAspect")
         AnimatedContent(
             targetState = track.id,
             transitionSpec = {
                 (slideInHorizontally(tween(300)) { it / 3 } + fadeIn(tween(300)))
                     .togetherWith(slideOutHorizontally(tween(240)) { -it / 3 } + fadeOut(tween(240)))
             },
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+            modifier = Modifier.fillMaxWidth().aspectRatio(artAspect).heightIn(max = 560.dp)
                 .graphicsLayer {
                     translationX = dragOffset * .55f
                     rotationZ = dragOffset / size.width * 5f
@@ -1399,7 +1421,7 @@ private fun splitArtists(value: String): List<String> {
                         Text(CanvasPrefs.label(s))
                     }
                 }
-                Text("Auto tries Echo Music first, then falls back to Apple Music, Convx, and Spotify. Spotify needs no account but is the slowest source.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                Text("Auto tries Apple Music first, then Echo Music, Convx, and Spotify. Streamed canvases play directly and need an internet connection; downloaded ones work offline.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
