@@ -1,6 +1,7 @@
 package com.example.canvasplayer
 
 import android.content.Context
+import android.graphics.Matrix
 import android.net.Uri
 import android.view.TextureView
 import androidx.compose.animation.core.Animatable
@@ -23,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -100,6 +102,8 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val firstFrameCallback by rememberUpdatedState(onFirstFrame)
     var videoAspect by remember(uri) { mutableStateOf(0f) }
+    var videoWpx by remember(uri) { mutableStateOf(0f) }
+    var videoHpx by remember(uri) { mutableStateOf(0f) }
     val offset by rememberUpdatedState(offsetMs)
     val vp = remember {
         ExoPlayer.Builder(ctx).build().apply {
@@ -115,6 +119,19 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
     }
     val texture = remember { TextureView(ctx).also { vp.setVideoTextureView(it) } }
 
+    // Cover transform: uniform scale until the view is filled, centred; the overflow is cropped.
+    // (Sizing the view bigger than the window is NOT safe — Compose clamps it and stretches the video.)
+    fun applyCoverTransform() {
+        if (!fill) return
+        val vw = texture.width.toFloat(); val vh = texture.height.toFloat()
+        if (videoWpx <= 0f || videoHpx <= 0f || vw <= 0f) return
+        val scale = maxOf(vw / videoWpx, vh / videoHpx)
+        val m = Matrix()
+        m.setScale(scale, scale)
+        m.postTranslate((vw - videoWpx * scale) / 2f, (vh - videoHpx * scale) / 2f)
+        texture.setTransform(m)
+    }
+
     // Declared first so it is disposed last: listeners are removed before the player is released.
     DisposableEffect(vp) { onDispose { runCatching { vp.release() } } }
 
@@ -127,7 +144,11 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
                 if (h <= 0f || w <= 0f) return
                 val rotated = videoSize.unappliedRotationDegrees == 90 || videoSize.unappliedRotationDegrees == 270
                 val raw = if (rotated) h / w else w / h
-                if (raw.isFinite() && raw > 0f) videoAspect = raw.coerceIn(0.2f, 5f)
+                if (!raw.isFinite() || raw <= 0f) return
+                videoAspect = raw.coerceIn(0.2f, 5f)
+                videoWpx = if (rotated) h else w
+                videoHpx = if (rotated) w else h
+                applyCoverTransform()
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) syncVideo(vp, audio, offset, 300)
@@ -183,21 +204,18 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
         onDispose { lifecycle.removeObserver(obs) }
     }
 
-    // Fit by explicit sizing: compute the largest video-shaped rect that fits and size the view to it.
+    // Contain: explicit fitted sizing. Cover: fill the view and let the transform crop uniformly.
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
-        val viewModifier = if (videoAspect > 0f) {
-            if (fill) { // cover: scale up until the area is filled; the excess is cropped by the window
-                var vw = maxWidth
-                var vh = maxWidth / videoAspect
-                if (vh < maxHeight) { vh = maxHeight; vw = maxHeight * videoAspect }
-                Modifier.size(vw, vh)
-            } else { // contain: the whole frame always fits, centred
+        if (fill) {
+            AndroidView(factory = { texture }, modifier = Modifier.fillMaxSize().onSizeChanged { applyCoverTransform() })
+        } else {
+            val viewModifier = if (videoAspect > 0f) {
                 var vw = maxWidth
                 var vh = maxWidth / videoAspect
                 if (vh > maxHeight) { vh = maxHeight; vw = maxHeight * videoAspect }
                 Modifier.size(vw, vh)
-            }
-        } else Modifier.fillMaxSize()
-        AndroidView(factory = { texture }, modifier = viewModifier)
+            } else Modifier.fillMaxSize()
+            AndroidView(factory = { texture }, modifier = viewModifier)
+        }
     }
 }

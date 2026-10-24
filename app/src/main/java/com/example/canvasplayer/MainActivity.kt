@@ -980,7 +980,7 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
             loadingWaveforms = false
         }
     }
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().background(if (video != null) Color.Black else Color.Transparent)) {
         // Immersive mode (Spotify/Musify style): the canvas fills the whole screen and the
         // controls float over it on a dark gradient. Songs without a video keep the classic layout.
         if (video != null) {
