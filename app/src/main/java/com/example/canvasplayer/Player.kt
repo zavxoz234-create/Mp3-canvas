@@ -95,7 +95,7 @@ private fun syncVideo(video: ExoPlayer, audio: Player, offsetMs: Long, tolerance
  * metadata, infinite/NaN ratios) is guarded so this can never crash the screen.
  */
 @Composable
-fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = Modifier, onFirstFrame: () -> Unit) {
+fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = Modifier, fill: Boolean = false, onFirstFrame: () -> Unit) {
     val ctx = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val firstFrameCallback by rememberUpdatedState(onFirstFrame)
@@ -186,10 +186,17 @@ fun LoopingVideo(uri: Uri, audio: Player, offsetMs: Long, modifier: Modifier = M
     // Fit by explicit sizing: compute the largest video-shaped rect that fits and size the view to it.
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
         val viewModifier = if (videoAspect > 0f) {
-            var vw = maxWidth
-            var vh = maxWidth / videoAspect
-            if (vh > maxHeight) { vh = maxHeight; vw = maxHeight * videoAspect }
-            Modifier.size(vw, vh)
+            if (fill) { // cover: scale up until the area is filled; the excess is cropped by the window
+                var vw = maxWidth
+                var vh = maxWidth / videoAspect
+                if (vh < maxHeight) { vh = maxHeight; vw = maxHeight * videoAspect }
+                Modifier.size(vw, vh)
+            } else { // contain: the whole frame always fits, centred
+                var vw = maxWidth
+                var vh = maxWidth / videoAspect
+                if (vh > maxHeight) { vh = maxHeight; vw = maxHeight * videoAspect }
+                Modifier.size(vw, vh)
+            }
         } else Modifier.fillMaxSize()
         AndroidView(factory = { texture }, modifier = viewModifier)
     }

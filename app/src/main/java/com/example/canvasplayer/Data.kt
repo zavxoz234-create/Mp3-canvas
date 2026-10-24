@@ -323,7 +323,7 @@ data class WaveformData(val durationMs: Long, val bars: List<Float>)
 
 /** Decodes audio into a small RMS waveform so users can line up a companion video by ear and sight. */
 object WaveformAnalyzer {
-    fun read(context: Context, uri: Uri, bins: Int = 180, fallbackPath: String? = null): WaveformData? {
+    fun read(context: Context, uri: Uri, bins: Int = 180, fallbackPath: String? = null, maxSeconds: Float = 0f): WaveformData? {
         val extractor = MediaExtractor()
         var decoder: MediaCodec? = null
         try {
@@ -411,6 +411,7 @@ object WaveformAnalyzer {
                         }
                     }
                     outputEnded = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                    if (maxSeconds > 0f && info.presentationTimeUs >= maxSeconds * 1_000_000L) outputEnded = true
                     decoder.releaseOutputBuffer(outputIndex, false)
                 }
             }

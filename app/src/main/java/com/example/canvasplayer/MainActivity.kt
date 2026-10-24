@@ -19,6 +19,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.TextStyle
@@ -48,6 +49,7 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -898,6 +900,7 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
     var syncDialog by remember { mutableStateOf(false) }
     var audioWaveform by remember(track.id) { mutableStateOf<WaveformData?>(null) }
     var videoWaveform by remember(track.id) { mutableStateOf<WaveformData?>(null) }
+    var syncVideoDuration by remember(track.id) { mutableStateOf(0L) }
     var loadingWaveforms by remember { mutableStateOf(false) }
     var downloadDialog by remember { mutableStateOf(false) }; var downloadUrl by remember { mutableStateOf("") }; var downloading by remember { mutableStateOf(false) }; var downloadProgress by remember { mutableFloatStateOf(0f) }; var updatingYtDlp by remember { mutableStateOf(false) }; var removeSponsorSegments by remember { mutableStateOf(false) }; var ytDlpError by remember { mutableStateOf<String?>(null) }
     var lookingUp by remember { mutableStateOf(false) }; var variants by remember { mutableStateOf<List<DownloadVariant>>(emptyList()) }; var selectedVariant by remember { mutableStateOf<String?>(null) }
@@ -961,17 +964,30 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
         if (syncDialog && video != null) {
             loadingWaveforms = true
             val data = withContext(Dispatchers.IO) {
+                // Only the first seconds are decoded — enough to align beats, several times faster.
                 val audio = waveformCache.get("a${track.id}")
-                    ?: WaveformAnalyzer.read(ctx, track.uri, fallbackPath = track.path)?.also { waveformCache.put("a${track.id}", it) }
+                    ?: WaveformAnalyzer.read(ctx, track.uri, bins = 480, fallbackPath = track.path, maxSeconds = 25f)?.also { waveformCache.put("a${track.id}", it) }
                 val videoWave = waveformCache.get(video.toString())
-                    ?: WaveformAnalyzer.read(ctx, video)?.also { waveformCache.put(video.toString(), it) }
-                audio to videoWave
+                    ?: WaveformAnalyzer.read(ctx, video, bins = 240, maxSeconds = 90f)?.also { waveformCache.put(video.toString(), it) }
+                val videoDurationMs = runCatching {
+                    val r = MediaMetadataRetriever()
+                    try { r.setDataSource(ctx, video); r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L }
+                    catch (_: Exception) { 0L } finally { r.release() }
+                }.getOrDefault(0L)
+                Triple(audio, videoWave, videoDurationMs)
             }
-            audioWaveform = data.first; videoWaveform = data.second
+            audioWaveform = data.first; videoWaveform = data.second; syncVideoDuration = data.third
             loadingWaveforms = false
         }
     }
     Box(Modifier.fillMaxSize()) {
+        // Immersive mode (Spotify/Musify style): the canvas fills the whole screen and the
+        // controls float over it on a dark gradient. Songs without a video keep the classic layout.
+        if (video != null) {
+            LoopingVideo(video, player, videoOffset, Modifier.fillMaxSize(), fill = true) {}
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .25f), Color.Transparent, Color.Black.copy(alpha = .6f), Color.Black.copy(alpha = .92f)))))
+            if (lyricsMode) LyricsOverlay(lyricsMode, track, lyrics, pos, player)
+        }
     BlurredAlbumBackground(track, Modifier.matchParentSize())
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1015,6 +1031,7 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
                 }
             }
         }
+        if (video == null) {
         Spacer(Modifier.weight(.4f))
         // Streamed canvases are 9:16 portrait: morph the frame to tall for them; art and downloaded videos stay square.
         val streamedCanvas = video != null && video.toString().startsWith("http")
@@ -1046,6 +1063,9 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
             }
         }
         Spacer(Modifier.height(26.dp))
+        } else {
+            Spacer(Modifier.weight(1f)) // fullscreen canvas: pin title/controls to the bottom over the gradient
+        }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             AnimatedContent(
                 targetState = track.id,
@@ -1072,28 +1092,19 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
             IconButton(onClick = onShuffle) { Icon(Icons.Default.Shuffle, "Shuffle", tint = if (shuffle) LocalAccent.current else Color.Gray) }
             IconButton(onClick = { syncDialog = true }, enabled = video != null) { Icon(Icons.Default.Sync, "Sync companion video", tint = if (video != null) LocalAccent.current else Color.Gray) }
         }
-        Spacer(Modifier.weight(.4f))
+        if (video == null) Spacer(Modifier.weight(.4f)) else Spacer(Modifier.height(28.dp))
     }
     }
     if (syncDialog) AlertDialog(onDismissRequest = { syncDialog = false }, title = { Text("Sync companion video") },
         text = { Column {
-            Text("Drag the video waveform to line up a beat. If waveforms cannot be decoded, play the track and use the manual offset controls below.", color = Color.LightGray)
+            Text("Drag the VIDEO waveform until its beats sit on the song's beats. Drag the audio strip or use the slider to move the 20-second window to another part of the song.", color = Color.LightGray)
             if (loadingWaveforms) LinearProgressIndicator(Modifier.fillMaxWidth())
-            if (audioWaveform != null || videoWaveform != null) SyncWaveforms(audioWaveform, videoWaveform, track.durationMs, videoOffset) { videoOffset = it }
+            if (audioWaveform != null || videoWaveform != null) SyncWaveforms(audioWaveform, videoWaveform, track.durationMs, syncVideoDuration, videoOffset.coerceIn(0L, track.durationMs), player) { videoOffset = it.coerceIn(0L, track.durationMs) }
             if (!loadingWaveforms && (audioWaveform == null || videoWaveform == null)) Text(
                 listOfNotNull(if (audioWaveform == null) "Could not decode the song waveform." else null, if (videoWaveform == null) "This video has no readable audio waveform." else null).joinToString(" ") + " You can still adjust sync below.",
                 color = Color.Gray, style = MaterialTheme.typography.bodySmall
             )
-            Slider(value = videoOffset.toFloat().coerceIn(-120_000f, 120_000f), onValueChange = { videoOffset = it.toLong() }, valueRange = -120_000f..120_000f)
-            Text("${if (videoOffset >= 0) "+" else "−"}${formatTime(kotlin.math.abs(videoOffset))}", color = LocalAccent.current)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { videoOffset = (videoOffset - 1_000L).coerceIn(-120_000L, 120_000L) }) { Text("−1 s") }
-                TextButton(onClick = { videoOffset = (videoOffset - 100L).coerceIn(-120_000L, 120_000L) }) { Text("−100 ms") }
-                TextButton(onClick = { if (player.isPlaying) player.pause() else player.play() }) { Text(if (player.isPlaying) "Pause" else "Play") }
-                TextButton(onClick = { videoOffset = (videoOffset + 100L).coerceIn(-120_000L, 120_000L) }) { Text("+100 ms") }
-                TextButton(onClick = { videoOffset = (videoOffset + 1_000L).coerceIn(-120_000L, 120_000L) }) { Text("+1 s") }
-            }
-        } }, confirmButton = { TextButton(onClick = { syncPrefs.edit().putLong("offset_${track.id}", videoOffset).apply(); syncDialog = false }) { Text("Save") } },
+        } }, confirmButton = { TextButton(onClick = { syncPrefs.edit().putLong("offset_${track.id}", videoOffset.coerceIn(0L, track.durationMs)).apply(); syncDialog = false }) { Text("Save") } },
         dismissButton = { TextButton(onClick = { videoOffset = 0L; syncPrefs.edit().remove("offset_${track.id}").apply(); syncDialog = false }) { Text("Reset") } })
     if (canvasSettings) CanvasSettingsDialog { canvasSettings = false }
     if (downloadDialog) AlertDialog(
@@ -1198,44 +1209,94 @@ private fun LyricsOverlay(visible: Boolean, track: Track, lyrics: List<TimedLyri
     )
 }
 
-@Composable private fun SyncWaveforms(audio: WaveformData?, video: WaveformData?, trackDurationMs: Long, offsetMs: Long, onOffsetChange: (Long) -> Unit) {
+/**
+ * Beat-alignment view. The audio strip shows a 20-second window of the song (drag it or use the
+ * slider to move through the track); the video waveform is drawn where its 0:00 lands in the song
+ * and can be dragged to align beats. Bars are normalised against the 95th percentile so quiet
+ * parts stay readable instead of everything rendering at maximum height.
+ */
+@Composable private fun SyncWaveforms(audio: WaveformData?, video: WaveformData?, trackDurationMs: Long, videoDurationMs: Long, offsetMs: Long, player: Player, onOffsetChange: (Long) -> Unit) {
     val accent = LocalAccent.current
-    val latestOffset = rememberUpdatedState(offsetMs)
-    Column {
+    val windowMs = 20_000L
+    val maxWindow = (trackDurationMs - windowMs).coerceAtLeast(0L)
+    var windowStart by remember { mutableStateOf((offsetMs - windowMs / 2).coerceIn(0L, maxWindow)) }
+    var stripWidthPx by remember { mutableStateOf(0f) }
+
+    fun dyn(bars: List<Float>): (Int) -> Float {
+        if (bars.isEmpty()) return { 0f }
+        val sorted = bars.sorted()
+        val p95 = sorted[((sorted.size - 1) * .95f).toInt()].coerceAtLeast(.001f)
+        return { i -> ((bars.getOrNull(i) ?: 0f) / p95).coerceIn(.06f, 1f) }
+    }
+
+    Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("SONG", color = Color.White, style = MaterialTheme.typography.labelSmall)
-            Text("VIDEO  •  DRAG TO ALIGN", color = accent, style = MaterialTheme.typography.labelSmall)
+            Text("SONG · 20 s window (drag to move)", style = MaterialTheme.typography.labelMedium, color = accent)
+            Text("VIDEO · drag to align", style = MaterialTheme.typography.labelMedium, color = accent)
         }
+        Spacer(Modifier.height(6.dp))
         Canvas(
-            Modifier.fillMaxWidth().height(112.dp).clip(RoundedCornerShape(12.dp)).background(Color.Black.copy(alpha = .36f))
-                .pointerInput(audio?.durationMs, video?.durationMs) {
-                    detectDragGestures { change, drag ->
-                        change.consume()
-                        onOffsetChange((latestOffset.value + drag.x * 50f).roundToLong().coerceIn(-30_000L, 30_000L))
-                    }
+            Modifier.fillMaxWidth().height(54.dp).onSizeChanged { stripWidthPx = it.width.toFloat() }
+                .pointerInput(trackDurationMs) {
+                    detectDragGestures { change, drag -> change.consume(); if (stripWidthPx > 0f) windowStart = (windowStart + (drag.x / stripWidthPx * windowMs).toLong()).coerceIn(0L, maxWindow) }
                 }
         ) {
-            val count = max(audio?.bars?.size ?: 0, video?.bars?.size ?: 0).coerceAtLeast(2)
-            val duration = audio?.durationMs?.takeIf { it > 0 } ?: trackDurationMs.coerceAtLeast(1L)
-            val audioCenter = size.height * .27f
-            val videoCenter = size.height * .73f
-            val maxAmp = size.height * .22f
-            val step = size.width / count
-            for (i in 0 until count) {
-                val x = (i + .5f) * step
-                val time = (i.toLong() * duration) / count
-                audio?.bars?.getOrNull(i * (audio.bars.size) / count)?.let { amplitude ->
-                    drawLine(Color.White.copy(alpha = .88f), Offset(x, audioCenter - amplitude * maxAmp), Offset(x, audioCenter + amplitude * maxAmp), step * .62f, StrokeCap.Round)
-                }
-                video?.let { wave ->
-                    val videoTime = Math.floorMod(time - latestOffset.value, wave.durationMs.coerceAtLeast(1L))
-                    val index = ((videoTime * wave.bars.size) / wave.durationMs.coerceAtLeast(1L)).toInt().coerceIn(0, wave.bars.lastIndex.coerceAtLeast(0))
-                    wave.bars.getOrNull(index)?.let { amplitude ->
-                        drawLine(accent.copy(alpha = .95f), Offset(x, videoCenter - amplitude * maxAmp), Offset(x, videoCenter + amplitude * maxAmp), step * .62f, StrokeCap.Round)
-                    }
+            val bars = audio?.bars.orEmpty()
+            if (bars.isNotEmpty()) {
+                val audioAmp = dyn(bars)
+                val span = (audio?.durationMs ?: 0L).coerceAtLeast(1L)
+                val pxPerMs = size.width / windowMs
+                val mid = size.height / 2f
+                val barW = (pxPerMs * (span.toFloat() / bars.size)).coerceIn(1f, 4f)
+                for (i in bars.indices) {
+                    val t = i * span / bars.size
+                    if (t < windowStart || t > windowStart + windowMs) continue
+                    val x = (t - windowStart) * pxPerMs
+                    val h = audioAmp(i) * (mid - 2f)
+                    drawLine(Color.LightGray, Offset(x, mid - h), Offset(x, mid + h), strokeWidth = barW)
                 }
             }
-            drawLine(Color.White.copy(alpha = .2f), Offset(0f, size.height / 2f), Offset(size.width, size.height / 2f), 1.dp.toPx())
+        }
+        Spacer(Modifier.height(4.dp))
+        Canvas(
+            Modifier.fillMaxWidth().height(54.dp)
+                .pointerInput(offsetMs, trackDurationMs) {
+                    detectDragGestures { change, drag -> change.consume(); if (stripWidthPx > 0f) onOffsetChange((offsetMs + (drag.x / stripWidthPx * windowMs)).toLong()) }
+                }
+        ) {
+            val bars = video?.bars.orEmpty()
+            if (bars.isNotEmpty()) {
+                val videoAmp = dyn(bars)
+                val loopMs = (if (videoDurationMs > 0L) videoDurationMs else (video?.durationMs ?: 0L)).coerceAtLeast(1L)
+                val span = (video?.durationMs ?: 0L).coerceAtLeast(1L)
+                val pxPerMs = size.width / windowMs
+                val mid = size.height / 2f
+                val x0 = (offsetMs - windowStart) * pxPerMs
+                val loopPx = loopMs * pxPerMs
+                val step = loopPx / bars.size
+                val barW = step.coerceIn(1f, 4f)
+                for (k in -1..2) {
+                    val base = x0 + k * loopPx
+                    for (i in bars.indices) {
+                        val x = base + i * step
+                        if (x < -8f || x > size.width + 8f) continue
+                        val h = videoAmp(i) * (mid - 2f)
+                        drawLine(accent, Offset(x, mid - h), Offset(x, mid + h), strokeWidth = barW)
+                    }
+                }
+                if (x0 in 0f..size.width) drawLine(Color.White, Offset(x0, 0f), Offset(x0, size.height), strokeWidth = 2f)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Slider(value = windowStart.toFloat(), onValueChange = { windowStart = it.toLong().coerceIn(0L, maxWindow) }, valueRange = 0f..maxOf(maxWindow.toFloat(), 1f), modifier = Modifier.fillMaxWidth())
+        Text("Audio window: ${formatTime(windowStart)} – ${formatTime((windowStart + windowMs).coerceAtMost(trackDurationMs))}   ·   video starts at ${formatTime(offsetMs)}", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(4.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { onOffsetChange((offsetMs - 1_000L).coerceAtLeast(0L)) }) { Text("−1 s") }
+            TextButton(onClick = { onOffsetChange((offsetMs - 100L).coerceAtLeast(0L)) }) { Text("−100 ms") }
+            TextButton(onClick = { player.seekTo(offsetMs); player.play() }) { Text("▶ here") }
+            TextButton(onClick = { onOffsetChange((offsetMs + 100L).coerceAtMost(trackDurationMs)) }) { Text("+100 ms") }
+            TextButton(onClick = { onOffsetChange((offsetMs + 1_000L).coerceAtMost(trackDurationMs)) }) { Text("+1 s") }
         }
     }
 }
